@@ -57,3 +57,16 @@ npx wrangler deploy
 ```
 
 The Worker also runs a scheduled monitor every 10 minutes through Cloudflare Cron Triggers.
+
+## GitHub Auto Deploy
+
+This repository includes `.github/workflows/deploy-worker.yml`.
+
+Add these GitHub repository secrets before using automatic deployment:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+After the secrets are configured, every push to `main` deploys the Worker automatically.
