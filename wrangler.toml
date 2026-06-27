@@ -1,0 +1,11 @@
+name = "seomonitor-api"
+main = "src/index.js"
+compatibility_date = "2026-06-27"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[d1_databases]]
+binding = "seo_monitor_db"
+database_name = "seo_monitor_db"
+database_id = "8fcc665b-2a5c-4814-8056-878165127df4"
