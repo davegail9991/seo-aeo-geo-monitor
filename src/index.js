@@ -7,7 +7,7 @@ const COOKIE = "seo_monitor_session";
 const SALT = "seo-monitor-admin-v1";
 const DEFAULT_USER = "admin@seomonitor.app";
 const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your".split(" "));
+const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
   ["linkedin", /linkedin\.com/i], ["youtube", /youtube\.com/i], ["tiktok", /tiktok\.com/i],
@@ -150,7 +150,7 @@ function schemas(h) {
 function cloud(fields) {
   const map = new Map(), add = (txt, w, loc) => {
     for (const word of (String(txt || "").toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) || [])) {
-      if (STOP.has(word) || word.length > 28) continue;
+      if (STOP.has(word) || word.length > 28 || /^u[0-9a-f]{4}$/i.test(word) || /^[0-9]+$/.test(word)) continue;
       const x = map.get(word) || { text: word, value: 0, score: 0, loc: new Set() };
       x.value++; x.score += w; x.loc.add(loc); map.set(word, x);
     }
