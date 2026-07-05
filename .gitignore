@@ -9,3 +9,8 @@ dist/
 build/
 .DS_Store
 Thumbs.db
+run-wrangler-login.ps1
+wrangler-login.*.log
+wrangler-login.pid
+backend/
+frontend/
