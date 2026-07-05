@@ -31,3 +31,29 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
 ON auth_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+  id INTEGER PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'admin',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS domain_audits (
+  id INTEGER PRIMARY KEY,
+  target_id INTEGER,
+  url TEXT NOT NULL,
+  normalized_host TEXT NOT NULL,
+  status TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 0,
+  report_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_domain_audits_host
+ON domain_audits(normalized_host);
+
+CREATE INDEX IF NOT EXISTS idx_domain_audits_created_at
+ON domain_audits(created_at);
