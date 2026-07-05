@@ -21,3 +21,13 @@ CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status);
 CREATE INDEX IF NOT EXISTS idx_targets_updated_at ON targets(updated_at);
 CREATE INDEX IF NOT EXISTS idx_monitor_logs_target_id ON monitor_logs(target_id);
 CREATE INDEX IF NOT EXISTS idx_monitor_logs_checked_at ON monitor_logs(checked_at);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token_hash TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+ON auth_sessions(expires_at);
