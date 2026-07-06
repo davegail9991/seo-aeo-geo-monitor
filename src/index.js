@@ -7,7 +7,7 @@ const COOKIE = "seo_monitor_session";
 const SALT = "seo-monitor-admin-v1";
 const DEFAULT_USER = "admin@seomonitor.app";
 const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const APP_VERSION = "2026-07-06-domain-ai-v2";
+const APP_VERSION = "2026-07-06-domain-ai-v3";
 const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json http www com net org cdn b-cdn media asset assets static upload uploads file files png jpg jpeg webp svg gif ico woff woff2 css js min api app wp admin cache font fonts data base64 charset meta link rel important color padding none display background background-color background-image border border-radius solid margin transform auto linear-gradient position flex top table center rgba px rem em vh vw calc var text align shadow cursor pointer nth child gap bottom widget bannerurl gamebanner fff deg para por btn div span size footer goldgroup radius box awc linear left gradient container weight dropdown right name block favor board img download wrapper title history max item items scale transparent swal active kho untuk pagetitle metadesc metatag overflow swiper".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
@@ -72,6 +72,7 @@ async function tables(env) {
     d.prepare("CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,username TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),expires_at TEXT NOT NULL)"),
     d.prepare("CREATE TABLE IF NOT EXISTS admin_users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'admin',created_at TEXT NOT NULL DEFAULT(datetime('now')))"),
     d.prepare("CREATE TABLE IF NOT EXISTS domain_audits(id INTEGER PRIMARY KEY,target_id INTEGER,url TEXT NOT NULL,host TEXT NOT NULL,status TEXT NOT NULL,score INTEGER NOT NULL,report_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')))"),
+    d.prepare("CREATE TABLE IF NOT EXISTS connector_settings(id TEXT PRIMARY KEY,base_url TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT(datetime('now')))"),
     d.prepare("CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status)"),
     d.prepare("CREATE INDEX IF NOT EXISTS idx_audits_host ON domain_audits(host)"),
     d.prepare("CREATE INDEX IF NOT EXISTS idx_audits_created ON domain_audits(created_at)")
@@ -340,35 +341,62 @@ async function logs(req, env) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
   return j({ ok: true, logs: (await db(env).prepare("SELECT l.*,t.url,t.keyword,t.status target_status FROM monitor_logs l LEFT JOIN targets t ON t.id=l.target_id ORDER BY l.id DESC LIMIT 500").all()).results });
 }
-function connectorStatus(env) {
+async function connectorRows(env) {
+  await tables(env);
+  const rows = (await db(env).prepare("SELECT id,base_url,enabled,updated_at FROM connector_settings").all()).results || [];
+  return new Map(rows.map((x) => [x.id, x]));
+}
+async function connectorStatus(env) {
+  const saved = await connectorRows(env);
   return CONNECTORS.map((c) => {
-    const base = String(env?.[c.env] || "").replace(/\/$/, "");
-    return { ...c, baseConfigured: !!base, status: base ? "configured" : "needs_self_hosted_endpoint" };
+    const row = saved.get(c.id);
+    const base = String(row?.base_url || env?.[c.env] || "").replace(/\/$/, "");
+    const enabled = row ? !!row.enabled : !!base;
+    return { ...c, baseUrl: base, enabled, baseConfigured: !!base, status: base && enabled ? "configured" : base ? "disabled" : "needs_self_hosted_endpoint", updatedAt: row?.updated_at || "" };
   });
 }
-async function externalIntel(env, r) {
-  const out = connectorStatus(env).map((c) => ({ id: c.id, name: c.name, repo: c.repo, category: c.category, status: c.status, evidence: [] }));
-  const openSerpBase = String(env?.OPEN_SERP_BASE || "").replace(/\/$/, "");
-  if (openSerpBase) {
-    const item = out.find((x) => x.id === "openserp");
+async function callConnector(c, r) {
+  if (!c.baseUrl || !c.enabled) return { id: c.id, name: c.name, repo: c.repo, category: c.category, status: c.status, evidence: [] };
+  const encoded = encodeURIComponent(r.finalUrl || r.url);
+  const candidates = c.id === "openserp"
+    ? [{ method: "GET", url: `${c.baseUrl}/mega/search?engines=google,bing&text=${encodeURIComponent(r.host)}&extract=0&mode=any` }]
+    : [
+        { method: "POST", url: `${c.baseUrl}/api/audit`, body: { url: r.finalUrl, host: r.host, keywords: r.content.topKeywords.slice(0, 10).map((x) => x.text) } },
+        { method: "POST", url: `${c.baseUrl}/audit`, body: { url: r.finalUrl, host: r.host } },
+        { method: "GET", url: `${c.baseUrl}/audit?url=${encoded}` }
+      ];
+  let last = "";
+  for (const req of candidates) {
     try {
-      const url = `${openSerpBase}/mega/search?engines=google,bing&text=${encodeURIComponent(r.host)}&extract=0&mode=any`;
-      const res = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(6000) });
-      item.status = res.ok ? "live" : `http_${res.status}`;
-      item.evidence = [(await res.text()).slice(0, 1200)];
-    } catch (e) {
-      item.status = "configured_but_unreachable";
-      item.evidence = [String(e.message || e)];
-    }
+      const init = { method: req.method, headers: { accept: "application/json,text/plain,*/*" }, signal: AbortSignal.timeout(6500) };
+      if (req.body) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(req.body); }
+      const res = await fetch(req.url, init);
+      const txt = (await res.text()).slice(0, 1800);
+      if (res.ok) return { id: c.id, name: c.name, repo: c.repo, category: c.category, status: "live", endpoint: req.url, evidence: [txt] };
+      last = `HTTP ${res.status} from ${req.url}: ${txt.slice(0, 240)}`;
+    } catch (e) { last = String(e.message || e); }
   }
-  return out;
+  return { id: c.id, name: c.name, repo: c.repo, category: c.category, status: "configured_but_unreachable", evidence: [last] };
+}
+async function externalIntel(env, r) {
+  const connectors = await connectorStatus(env);
+  return Promise.all(connectors.map((c) => callConnector(c, r)));
 }
 async function integrations(req, env) {
-  const a = await auth(req, env); if (!a.ok) return a.response;
+  const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
+  if (req.method === "POST") {
+    const b = await body(req), id = String(b.id || ""), c = CONNECTORS.find((x) => x.id === id);
+    if (!c) return err("Unknown connector", 404);
+    const base = String(b.baseUrl || "").trim().replace(/\/$/, "");
+    const enabled = b.enabled === false ? 0 : base ? 1 : 0;
+    if (base && !/^https?:\/\/[^ ]+$/i.test(base)) return err("Connector endpoint must be a valid http(s) URL", 422);
+    await db(env).prepare("INSERT INTO connector_settings(id,base_url,enabled,updated_at) VALUES(?,?,?,datetime('now')) ON CONFLICT(id) DO UPDATE SET base_url=excluded.base_url,enabled=excluded.enabled,updated_at=datetime('now')").bind(id, base, enabled).run();
+    return j({ ok: true, connector: (await connectorStatus(env)).find((x) => x.id === id) });
+  }
   return j({
     ok: true,
-    connectors: connectorStatus(env),
-    note: "These are free open-source connectors. Cloudflare Workers cannot run their Python/Go/MCP crawlers directly, so each connector becomes active after you deploy that project as a self-hosted endpoint and add its base URL as a Worker secret or variable."
+    connectors: await connectorStatus(env),
+    note: "These are free open-source connectors. Cloudflare Workers cannot run their Python/Go/MCP crawlers directly, so each connector becomes active after you deploy that project as a self-hosted endpoint and save its base URL here."
   });
 }
 async function deleteTarget(req, env, id) {
@@ -393,7 +421,7 @@ function page() {
     <section id=dash class="view on"><div class=metrics><div class=metric>Domains<b id=mt>0</b></div><div class=metric>Reports<b id=mr>0</b></div><div class=metric>Latest Score<b id=ms>-</b></div><div class=metric>Status<b id=mst>-</b></div></div><br><div class=grid><div class=panel><h2>Domain Audit AI</h2><form id=tf><label>Domain / URL</label><input id=url placeholder=https://example.com required><br><br><button id=tb class=btn>Run AI Domain Audit</button><p id=te style=color:#fb7185></p></form></div><div class=panel><h2>Domain Targets</h2><table><thead><tr><th>URL</th><th>Status</th><th>Score</th><th>Action</th></tr></thead><tbody id=targets></tbody></table></div></div><br><div class=panel><h2>Monitor Logs</h2><table><thead><tr><th>Checked</th><th>Target</th><th>Type</th><th>Result</th></tr></thead><tbody id=logs></tbody></table></div></section>
     <section id=audit class=view><div class=panel><h2>Domain Audit AI Report</h2><div id=latest class=muted>Run a domain audit first.</div></div></section>
     <section id=reports class=view><div class=split><div class=panel><h2>Reports By Domain</h2><div id=rl></div></div><div class=panel><h2>Domain Report Detail</h2><div id=rd class=muted>Select a domain report.</div></div></div></section>
-    <section id=integrations class=view><div class=panel><h2>5 Free Open-source SEO/AEO/GEO Connectors</h2><p class=muted>These are wired as connector slots. A connector becomes live after that open-source project is deployed as a self-hosted API and its base URL is added to this Worker.</p><div id=connectorRows></div></div></section>
+    <section id=integrations class=view><div class=panel><h2>5 Free Open-source SEO/AEO/GEO Connectors</h2><p class=muted>Paste the self-hosted API endpoint for each open-source project. Enabled connectors will run automatically during the next domain audit.</p><div id=connectorRows></div></div></section>
     <section id=admins class=view><div class=grid><div class=panel><h2>Create Admin</h2><form id=af><label>Email</label><input id=ae><label>Password</label><input id=ap type=password><br><br><button class=btn>Create Admin</button><p id=aa style=color:#fb7185></p></form></div><div class=panel><h2>Admins</h2><table><tbody id=adminRows></tbody></table></div></div></section>
   </main></section><script>
   const E=id=>document.getElementById(id), q=s=>document.querySelectorAll(s), eh=x=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
@@ -403,7 +431,9 @@ function page() {
   function list(title,arr){return '<h3>'+eh(title)+'</h3><ul>'+((arr&&arr.length)?arr.map(x=>'<li>'+eh(x)+'</li>').join(""):'<li class=muted>No signal detected.</li>')+'</ul>'}
   function report(d){if(!d)return"No report yet";let ai=d.aiAudit||{},b=d.scoreBreakdown||{},cx=d.externalConnectors||[];return '<div class=metrics><div class=metric>Score<b>'+d.score+'</b></div><div class=metric>Technical<b>'+(b.technical??"-")+'</b></div><div class=metric>Content<b>'+(b.content??"-")+'</b></div><div class=metric>Entity<b>'+(b.entity??"-")+'</b></div></div><h3>AI Executive Summary</h3><p>'+eh(ai.executiveSummary||"AI audit is being generated from deterministic SEO/AEO/GEO rules.")+'</p>'+list("AI SEO Diagnosis",ai.seoDiagnosis)+list("AI AEO Diagnosis",ai.aeoDiagnosis)+list("AI GEO Diagnosis",ai.geoDiagnosis)+list("AI Priority Action Plan",ai.priorityActions)+'<h3>SEO Snapshot</h3><p><b>Title:</b> '+eh(d.seo.title||"Missing")+' ('+d.seo.titleLength+')</p><p><b>Description:</b> '+eh(d.seo.description||"Missing")+' ('+d.seo.descriptionLength+')</p><p><b>H1:</b> '+eh(d.seo.h1.join(" | ")||"Missing")+'</p><p><b>Canonical:</b> '+eh(d.technical.canonical||"Missing")+'</p><p><b>Schema:</b> '+eh(d.schema.types.join(", ")||"Missing")+'</p><p><b>Platforms:</b> '+eh(d.platforms.map(p=>p.platform).join(", ")||"None detected")+'</p><h3>Technical Issues</h3><ul>'+d.issues.map(x=>'<li>'+eh(x)+'</li>').join("")+'</ul><h3>Keyword Cloud</h3><div class=words>'+d.content.topKeywords.map(w=>'<span class=word title="count '+w.value+' | bias '+w.location_bias+'">'+eh(w.text)+' '+w.score+'</span>').join("")+'</div><h3>Open-source Connector Evidence</h3><div>'+cx.map(c=>'<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(c.status)+'</span><p class=muted>'+eh(c.category||"")+'</p><a style=color:#93c5fd href="'+eh(c.repo)+'" target=_blank>'+eh(c.repo)+'</a></div>').join("")+'</div><h3>Platform URLs</h3><pre>'+eh(d.platforms.flatMap(p=>p.urls.map(u=>p.platform+": "+u)).join("\\n")||"No major platform links detected.")+'</pre>'}
   function groupedReports(rows){let g={};rows.forEach(x=>{(g[x.host]=g[x.host]||[]).push(x)});return Object.entries(g).map(([host,items])=>'<div class=report data-id='+items[0].id+'><b>'+eh(host)+'</b><p class=muted>'+items.length+' reports | latest '+eh(items[0].created_at)+' | score '+items[0].score+'</p><small class=muted>'+items.slice(0,4).map(x=>eh(x.created_at)+' score '+x.score).join('<br>')+'</small></div>').join("")}
-  async function load(){let [t,l,r,a,i]=await Promise.all([api("/api/targets"),api("/api/logs"),api("/api/reports"),api("/api/admins"),api("/api/integrations")]);E("mt").textContent=t.targets.length;E("mr").textContent=r.reports.length;E("ms").textContent=r.reports[0]?.score??"-";E("mst").textContent=r.reports[0]?.status??"-";E("targets").innerHTML=t.targets.length?t.targets.map(x=>'<tr><td>'+eh(x.url)+'</td><td><span class=badge>'+eh(x.status)+'</span></td><td>'+eh(x.latest_score??"-")+'</td><td><button class="btn btn2 danger mini" data-del="'+x.id+'">Delete</button></td></tr>').join(""):'<tr><td colspan=4 class=muted>No domains yet.</td></tr>';q("[data-del]").forEach(b=>b.onclick=async()=>{if(!confirm("Delete this domain and all its reports?"))return;b.disabled=1;try{await api("/api/targets/"+b.dataset.del,{method:"DELETE"});await load()}catch(e){alert(e.message||"Delete failed")}finally{b.disabled=0}});E("logs").innerHTML=l.logs.length?l.logs.map(x=>'<tr><td>'+eh(x.checked_at)+'</td><td>'+eh(x.url||"-")+'</td><td>'+eh(x.platform)+'</td><td>'+eh(x.rank_or_mention)+'<br><span class=muted>'+eh(x.response_snippet)+'</span></td></tr>').join(""):'<tr><td colspan=4 class=muted>No logs yet.</td></tr>';E("rl").innerHTML=r.reports.length?groupedReports(r.reports):'<p class=muted>No reports yet.</p>';q(".report").forEach(x=>x.onclick=async()=>{let d=await api("/api/reports/"+x.dataset.id);E("rd").innerHTML=report(d.report.data);nav("reports")});E("connectorRows").innerHTML=i.connectors.map(c=>'<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(c.status)+'</span><p class=muted>'+eh(c.category)+' | '+eh(c.mode)+' | env '+eh(c.env)+'</p><a style=color:#93c5fd href="'+eh(c.repo)+'" target=_blank>'+eh(c.repo)+'</a></div>').join("");E("adminRows").innerHTML=a.admins.map(x=>'<tr><td>'+eh(x.username)+'</td><td>'+eh(x.role)+'</td><td>'+eh(x.created_at)+'</td></tr>').join("");if(r.reports[0]){let d=await api("/api/reports/"+r.reports[0].id);E("latest").innerHTML=report(d.report.data)}}
+  function connectorHtml(c){return '<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(c.status)+'</span><p class=muted>'+eh(c.category)+' | '+eh(c.mode)+'</p><label>Endpoint URL</label><input data-curl="'+eh(c.id)+'" value="'+eh(c.baseUrl||"")+'" placeholder="https://your-'+eh(c.id)+'.workers.dev"><div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn mini" data-csave="'+eh(c.id)+'">Save / Enable</button><button class="btn btn2 mini" data-cclear="'+eh(c.id)+'">Disable</button><a style="color:#93c5fd;align-self:center" href="'+eh(c.repo)+'" target=_blank>GitHub</a></div></div>'}
+  function bindConnectorControls(){q("[data-csave]").forEach(b=>b.onclick=async()=>{let id=b.dataset.csave,input=document.querySelector('[data-curl="'+id+'"]');b.disabled=1;try{await api("/api/integrations",{method:"POST",body:JSON.stringify({id,baseUrl:input.value,enabled:true})});await load()}catch(e){alert(e.message||"Save failed")}finally{b.disabled=0}});q("[data-cclear]").forEach(b=>b.onclick=async()=>{let id=b.dataset.cclear;b.disabled=1;try{await api("/api/integrations",{method:"POST",body:JSON.stringify({id,baseUrl:"",enabled:false})});await load()}catch(e){alert(e.message||"Disable failed")}finally{b.disabled=0}})}
+  async function load(){let [t,l,r,a,i]=await Promise.all([api("/api/targets"),api("/api/logs"),api("/api/reports"),api("/api/admins"),api("/api/integrations")]);E("mt").textContent=t.targets.length;E("mr").textContent=r.reports.length;E("ms").textContent=r.reports[0]?.score??"-";E("mst").textContent=r.reports[0]?.status??"-";E("targets").innerHTML=t.targets.length?t.targets.map(x=>'<tr><td>'+eh(x.url)+'</td><td><span class=badge>'+eh(x.status)+'</span></td><td>'+eh(x.latest_score??"-")+'</td><td><button class="btn btn2 danger mini" data-del="'+x.id+'">Delete</button></td></tr>').join(""):'<tr><td colspan=4 class=muted>No domains yet.</td></tr>';q("[data-del]").forEach(b=>b.onclick=async()=>{if(!confirm("Delete this domain and all its reports?"))return;b.disabled=1;try{await api("/api/targets/"+b.dataset.del,{method:"DELETE"});await load()}catch(e){alert(e.message||"Delete failed")}finally{b.disabled=0}});E("logs").innerHTML=l.logs.length?l.logs.map(x=>'<tr><td>'+eh(x.checked_at)+'</td><td>'+eh(x.url||"-")+'</td><td>'+eh(x.platform)+'</td><td>'+eh(x.rank_or_mention)+'<br><span class=muted>'+eh(x.response_snippet)+'</span></td></tr>').join(""):'<tr><td colspan=4 class=muted>No logs yet.</td></tr>';E("rl").innerHTML=r.reports.length?groupedReports(r.reports):'<p class=muted>No reports yet.</p>';q(".report").forEach(x=>x.onclick=async()=>{let d=await api("/api/reports/"+x.dataset.id);E("rd").innerHTML=report(d.report.data);nav("reports")});E("connectorRows").innerHTML=i.connectors.map(connectorHtml).join("");bindConnectorControls();E("adminRows").innerHTML=a.admins.map(x=>'<tr><td>'+eh(x.username)+'</td><td>'+eh(x.role)+'</td><td>'+eh(x.created_at)+'</td></tr>').join("");if(r.reports[0]){let d=await api("/api/reports/"+r.reports[0].id);E("latest").innerHTML=report(d.report.data)}}
   E("lf").onsubmit=async e=>{e.preventDefault();E("le").textContent="";E("lb").disabled=1;try{await api("/api/login",{method:"POST",body:JSON.stringify({username:E("u").value.trim(),password:E("p").value})});show(1);await load()}catch(x){E("le").textContent=x.message||"Login failed"}finally{E("lb").disabled=0}}
   E("tf").onsubmit=async e=>{e.preventDefault();E("tb").disabled=1;E("te").textContent="AI audit running...";try{let x=await api("/api/targets",{method:"POST",body:JSON.stringify({url:E("url").value})});E("tf").reset();E("latest").innerHTML=report(x.report);nav("audit");await load();E("te").textContent=""}catch(x){E("te").textContent=x.message}finally{E("tb").disabled=0}}
   E("af").onsubmit=async e=>{e.preventDefault();try{await api("/api/admins",{method:"POST",body:JSON.stringify({username:E("ae").value,password:E("ap").value})});E("af").reset();await load()}catch(x){E("aa").textContent=x.message}}
