@@ -7,7 +7,7 @@ const COOKIE = "seo_monitor_session";
 const SALT = "seo-monitor-admin-v1";
 const DEFAULT_USER = "admin@seomonitor.app";
 const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const APP_VERSION = "2026-07-06-domain-ai-v5";
+const APP_VERSION = "2026-07-06-domain-ai-v6";
 const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json http www com net org cdn b-cdn media asset assets static upload uploads file files png jpg jpeg webp svg gif ico woff woff2 css js min api app wp admin cache font fonts data base64 charset meta link rel important color padding none display background background-color background-image border border-radius solid margin transform auto linear-gradient position flex top table center rgba px rem em vh vw calc var text align shadow cursor pointer nth child gap bottom widget bannerurl gamebanner fff deg para por btn div span size footer goldgroup radius box awc linear left gradient container weight dropdown right name block favor board img download wrapper title history max item items scale transparent swal active kho untuk pagetitle metadesc metatag overflow swiper".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
@@ -279,6 +279,7 @@ async function fetchPage(url) {
 }
 async function audit(url) {
   const input = norm(url); if (!input) throw new Error("Invalid domain");
+  const inputHost = hostOf(input);
   const start = Date.now(), p = await fetchPage(input), h = p.html, base = p.finalUrl || input, host = new URL(base).hostname.replace(/^www\./, "");
   const bodyHtml = first(h, /<body\b[^>]*>([\s\S]*?)<\/body>/i) || h;
   const bodyText = text(readableHtml(bodyHtml.replace(/<nav[\s\S]*?<\/nav>/gi, " ").replace(/<footer[\s\S]*?<\/footer>/gi, " ").replace(/<aside[\s\S]*?<\/aside>/gi, " ")));
@@ -291,7 +292,7 @@ async function audit(url) {
   const platforms = PLATFORMS.map(([platform, re]) => ({ platform, urls: linkList.filter((l) => re.test(l.href)).map((l) => l.href).slice(0, 5) })).filter((p) => p.urls.length);
   const img = h.match(/<img\b[^>]*>/gi) || [];
   const r = {
-    url: input, finalUrl: base, host, fetchedAt: now(), latencyMs: Date.now() - start, httpStatus: p.status,
+    url: input, inputUrl: input, inputHost, finalUrl: base, host, fetchedAt: now(), latencyMs: Date.now() - start, httpStatus: p.status,
     seo: { title, titleLength: title.length, description: desc, descriptionLength: desc.length, keywords: meta(h, "keywords"), h1, h2, h3 },
     technical: { canonical: canonicalAbsolute, canonicalHost, canonicalMatchesHost: !canonicalHost || canonicalHost === host, robots: meta(h, "robots"), viewport: meta(h, "viewport"), images: img.length, imagesMissingAlt: img.filter((x) => !attr(x, "alt")).length },
     openGraph: { present: /<meta\b[^>]*(property|name)=["']og:/i.test(h), title: meta(h, "og:title"), description: meta(h, "og:description"), image: meta(h, "og:image") },
@@ -317,7 +318,7 @@ async function saveAudit(env, url, keyword = "") {
     const report = await audit(u);
     report.externalConnectors = await externalIntel(env, report);
     await d.batch([
-      d.prepare("INSERT INTO domain_audits(target_id,url,host,status,score,report_json) VALUES(?,?,?,'completed',?,?)").bind(target.id, report.finalUrl, report.host, report.score, JSON.stringify(report)),
+      d.prepare("INSERT INTO domain_audits(target_id,url,host,status,score,report_json) VALUES(?,?,?,'completed',?,?)").bind(target.id, report.inputUrl || u, report.inputHost || hostOf(u) || report.host, report.score, JSON.stringify(report)),
       d.prepare("UPDATE targets SET status='completed',updated_at=datetime('now') WHERE id=?").bind(target.id),
       d.prepare("INSERT INTO monitor_logs(target_id,platform,rank_or_mention,response_snippet) VALUES(?,'site-audit',?,?)").bind(target.id, `score-${report.score}`, report.recommendations.summary.join(" "))
     ]);
@@ -335,7 +336,8 @@ async function targets(req, env) {
 async function reports(req, env, id) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
   if (id) { const r = await db(env).prepare("SELECT * FROM domain_audits WHERE id=?").bind(id).first(); return r ? j({ ok: true, report: { ...r, data: JSON.parse(r.report_json) } }) : err("Report not found", 404); }
-  return j({ ok: true, reports: (await db(env).prepare("SELECT id,target_id,url,host,status,score,created_at FROM domain_audits ORDER BY id DESC LIMIT 100").all()).results });
+  const rows = (await db(env).prepare("SELECT a.id,a.target_id,a.url,a.host,a.status,a.score,a.created_at,t.url target_url FROM domain_audits a LEFT JOIN targets t ON t.id=a.target_id ORDER BY a.id DESC LIMIT 100").all()).results || [];
+  return j({ ok: true, reports: rows.map((x) => ({ ...x, display_host: hostOf(x.target_url || x.url) || x.host })) });
 }
 async function logs(req, env) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
@@ -456,7 +458,7 @@ function page() {
   q(".nav button").forEach(b=>b.onclick=()=>nav(b.dataset.v));function show(a){E("login").classList.toggle("hide",a);E("app").classList.toggle("hide",!a)}
   function list(title,arr){return '<h3>'+eh(title)+'</h3><ul>'+((arr&&arr.length)?arr.map(x=>'<li>'+eh(x)+'</li>').join(""):'<li class=muted>No signal detected.</li>')+'</ul>'}
   function report(d){if(!d)return"No report yet";let ai=d.aiAudit||{},b=d.scoreBreakdown||{},cx=d.externalConnectors||[];return '<div class=metrics><div class=metric>Score<b>'+d.score+'</b></div><div class=metric>Technical<b>'+(b.technical??"-")+'</b></div><div class=metric>Content<b>'+(b.content??"-")+'</b></div><div class=metric>Entity<b>'+(b.entity??"-")+'</b></div></div><h3>AI Executive Summary</h3><p>'+eh(ai.executiveSummary||"AI audit is being generated from deterministic SEO/AEO/GEO rules.")+'</p>'+list("AI SEO Diagnosis",ai.seoDiagnosis)+list("AI AEO Diagnosis",ai.aeoDiagnosis)+list("AI GEO Diagnosis",ai.geoDiagnosis)+list("AI Priority Action Plan",ai.priorityActions)+'<h3>SEO Snapshot</h3><p><b>Title:</b> '+eh(d.seo.title||"Missing")+' ('+d.seo.titleLength+')</p><p><b>Description:</b> '+eh(d.seo.description||"Missing")+' ('+d.seo.descriptionLength+')</p><p><b>H1:</b> '+eh(d.seo.h1.join(" | ")||"Missing")+'</p><p><b>Canonical:</b> '+eh(d.technical.canonical||"Missing")+'</p><p><b>Schema:</b> '+eh(d.schema.types.join(", ")||"Missing")+'</p><p><b>Platforms:</b> '+eh(d.platforms.map(p=>p.platform).join(", ")||"None detected")+'</p><h3>Technical Issues</h3><ul>'+d.issues.map(x=>'<li>'+eh(x)+'</li>').join("")+'</ul><h3>Keyword Cloud</h3><div class=words>'+d.content.topKeywords.map(w=>'<span class=word title="count '+w.value+' | bias '+w.location_bias+'">'+eh(w.text)+' '+w.score+'</span>').join("")+'</div><h3>Backend Monitor Evidence</h3><div>'+cx.map(c=>'<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(c.status)+'</span><p class=muted>'+eh(c.category||"")+'</p><pre>'+eh((c.evidence||[]).join("\\n"))+'</pre></div>').join("")+'</div><h3>Platform URLs</h3><pre>'+eh(d.platforms.flatMap(p=>p.urls.map(u=>p.platform+": "+u)).join("\\n")||"No major platform links detected.")+'</pre>'}
-  function groupedReports(rows){let g={};rows.forEach(x=>{(g[x.host]=g[x.host]||[]).push(x)});return Object.entries(g).map(([host,items])=>'<div class=report data-id='+items[0].id+'><b>'+eh(host)+'</b><p class=muted>'+items.length+' reports | latest '+eh(items[0].created_at)+' | score '+items[0].score+'</p><small class=muted>'+items.slice(0,4).map(x=>eh(x.created_at)+' score '+x.score).join('<br>')+'</small></div>').join("")}
+  function groupedReports(rows){let g={};rows.forEach(x=>{let h=x.display_host||x.host;(g[h]=g[h]||[]).push(x)});return Object.entries(g).map(([host,items])=>'<div class=report data-id='+items[0].id+'><b>'+eh(host)+'</b><p class=muted>'+items.length+' reports | latest '+eh(items[0].created_at)+' | score '+items[0].score+'</p><small class=muted>'+items.slice(0,4).map(x=>eh(x.created_at)+' score '+x.score).join('<br>')+'</small></div>').join("")}
   function connectorHtml(c){return '<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>auto-running</span><p class=muted>'+eh(c.category)+' | backend module bundled | source: '+eh(c.repo)+'</p></div>'}
   function bindConnectorControls(){}
   async function load(){let [t,l,r,a,i]=await Promise.all([api("/api/targets"),api("/api/logs"),api("/api/reports"),api("/api/admins"),api("/api/integrations")]);E("mt").textContent=t.targets.length;E("mr").textContent=r.reports.length;E("ms").textContent=r.reports[0]?.score??"-";E("mst").textContent=r.reports[0]?.status??"-";E("targets").innerHTML=t.targets.length?t.targets.map(x=>'<tr><td>'+eh(x.url)+'</td><td><span class=badge>'+eh(x.status)+'</span></td><td>'+eh(x.latest_score??"-")+'</td><td><button class="btn btn2 danger mini" data-del="'+x.id+'">Delete</button></td></tr>').join(""):'<tr><td colspan=4 class=muted>No domains yet.</td></tr>';q("[data-del]").forEach(b=>b.onclick=async()=>{if(!confirm("Delete this domain and all its reports?"))return;b.disabled=1;try{await api("/api/targets/"+b.dataset.del,{method:"DELETE"});await load()}catch(e){alert(e.message||"Delete failed")}finally{b.disabled=0}});E("logs").innerHTML=l.logs.length?l.logs.map(x=>'<tr><td>'+eh(x.checked_at)+'</td><td>'+eh(x.url||"-")+'</td><td>'+eh(x.platform)+'</td><td>'+eh(x.rank_or_mention)+'<br><span class=muted>'+eh(x.response_snippet)+'</span></td></tr>').join(""):'<tr><td colspan=4 class=muted>No logs yet.</td></tr>';E("rl").innerHTML=r.reports.length?groupedReports(r.reports):'<p class=muted>No reports yet.</p>';q(".report").forEach(x=>x.onclick=async()=>{let d=await api("/api/reports/"+x.dataset.id);E("rd").innerHTML=report(d.report.data);nav("reports")});E("connectorRows").innerHTML=i.connectors.map(connectorHtml).join("");bindConnectorControls();E("adminRows").innerHTML=a.admins.map(x=>'<tr><td>'+eh(x.username)+'</td><td>'+eh(x.role)+'</td><td>'+eh(x.created_at)+'</td></tr>').join("");if(r.reports[0]){let d=await api("/api/reports/"+r.reports[0].id);E("latest").innerHTML=report(d.report.data)}}
