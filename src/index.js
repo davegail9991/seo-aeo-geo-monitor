@@ -1,13 +1,13 @@
 const H = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 const COOKIE = "seo_monitor_session";
 const SALT = "seo-monitor-admin-v1";
 const DEFAULT_USER = "admin@seomonitor.app";
 const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const APP_VERSION = "2026-07-06-domain-ai-v1";
+const APP_VERSION = "2026-07-06-domain-ai-v2";
 const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json http www com net org cdn b-cdn media asset assets static upload uploads file files png jpg jpeg webp svg gif ico woff woff2 css js min api app wp admin cache font fonts data base64 charset meta link rel important color padding none display background background-color background-image border border-radius solid margin transform auto linear-gradient position flex top table center rgba px rem em vh vw calc var text align shadow cursor pointer nth child gap bottom widget bannerurl gamebanner fff deg para por btn div span size footer goldgroup radius box awc linear left gradient container weight dropdown right name block favor board img download wrapper title history max item items scale transparent swal active kho untuk pagetitle metadesc metatag overflow swiper".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
@@ -15,12 +15,22 @@ const PLATFORMS = [
   ["telegram", /t\.me|telegram\.me/i], ["reddit", /reddit\.com/i], ["trustpilot", /trustpilot\.com/i],
   ["crunchbase", /crunchbase\.com/i], ["wikipedia", /wikipedia\.org/i], ["github", /github\.com/i],
 ];
+const CONNECTORS = [
+  { id: "openserp", name: "OpenSERP", category: "Live SERP rank and search result API", repo: "https://github.com/karust/openserp", env: "OPEN_SERP_BASE", mode: "REST when self-hosted" },
+  { id: "open-seo-crawler", name: "Open SEO Crawler", category: "Spider crawl and on-page SEO checks", repo: "https://github.com/puneetindersingh/open-seo-crawler", env: "OPEN_SEO_CRAWLER_BASE", mode: "Self-hosted crawler endpoint" },
+  { id: "python-seo-analyzer", name: "python-seo-analyzer", category: "Site structure, word count and SEO warnings", repo: "https://github.com/sethblack/python-seo-analyzer", env: "PYTHON_SEO_ANALYZER_BASE", mode: "Self-hosted wrapper endpoint" },
+  { id: "geo-optimizer", name: "GEO Optimizer Skill", category: "AEO/GEO answer engine readiness", repo: "https://github.com/Auriti-Labs/geo-optimizer-skill", env: "GEO_OPTIMIZER_BASE", mode: "CLI/Python/MCP bridge endpoint" },
+  { id: "librecrawl", name: "LibreCrawl Technical SEO MCP", category: "AI-native technical SEO audit tools", repo: "https://github.com/adityaarsharma/librecrawl-technical-seo-audit-mcp", env: "LIBRECRAWL_BASE", mode: "MCP or REST bridge endpoint" },
+];
 
 const j = (x, s = 200, h = {}) => new Response(JSON.stringify(x), { status: s, headers: { ...H, ...h, "content-type": "application/json;charset=utf-8" } });
 const html = (x) => new Response(x, { headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" } });
 const err = (m, s = 400) => j({ ok: false, error: m }, s);
 const db = (env) => env.seo_monitor_db || env.DB;
 const now = () => new Date().toISOString();
+function hostOf(x = "") {
+  try { return new URL(String(x)).hostname.replace(/^www\./, "").toLowerCase(); } catch { return ""; }
+}
 const clean = (x = "") => String(x).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&nbsp;/g, " ");
 const text = (x = "") => clean(String(x).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
 const esc = (x = "") => String(x).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]));
@@ -195,35 +205,55 @@ function cloud(fields) {
   return [...map.values()].map((x) => ({ text: x.text, value: x.value, score: +x.score.toFixed(1), location_bias: x.loc.has("title") || x.loc.has("h1") ? "title_h1" : x.loc.has("meta") ? "metadata" : "body" })).sort((a, b) => b.score - a.score).slice(0, 40);
 }
 function score(r) {
-  let s = 100; const issues = [], bad = (ok, p, msg) => { if (!ok) { s -= p; issues.push(msg); } };
+  let s = 100; const issues = [], penalties = [];
+  const bad = (ok, p, msg) => { if (!ok) { s -= p; issues.push(msg); penalties.push({ points: p, issue: msg }); } };
+  const imgAltRatio = r.technical.images ? (r.technical.images - r.technical.imagesMissingAlt) / r.technical.images : 1;
+  const canonicalOk = !r.technical.canonicalHost || r.technical.canonicalHost === r.host;
   bad(r.seo.titleLength >= 25 && r.seo.titleLength <= 65, 10, "Title should be 25-65 characters.");
   bad(r.seo.descriptionLength >= 70 && r.seo.descriptionLength <= 160, 10, "Meta description should be 70-160 characters.");
-  bad(r.seo.h1.length === 1, 10, "Use exactly one strong H1.");
+  bad(r.seo.h1.length === 1, 12, "Use exactly one strong H1.");
   bad(!!r.technical.canonical, 8, "Add canonical tag.");
+  bad(canonicalOk, 16, `Canonical points to ${r.technical.canonicalHost}, not ${r.host}; this can make Google consolidate ranking signals into another domain.`);
   bad(r.schema.types.length > 0, 12, "Add JSON-LD schema for AEO/GEO.");
-  bad(r.openGraph.present, 8, "Add OpenGraph metadata.");
+  bad(r.openGraph.present, 6, "Add OpenGraph metadata.");
   bad(r.content.wordCount >= 300, 10, "Homepage content is thin; add 300+ meaningful words.");
-  bad(r.platforms.length >= 3, 6, "Link/register more entity platforms.");
-  return { score: Math.max(0, s), issues };
+  bad(imgAltRatio >= 0.5, 5, "More than half of images are missing ALT text.");
+  bad(r.platforms.length >= 3, 8, "Link/register more entity platforms.");
+  const score = Math.max(0, s);
+  return {
+    score,
+    issues,
+    breakdown: {
+      technical: Math.max(0, 40 - penalties.filter((p) => /canonical|OpenGraph|ALT/i.test(p.issue)).reduce((a, p) => a + p.points, 0)),
+      content: Math.max(0, 30 - penalties.filter((p) => /Title|description|H1|content/i.test(p.issue)).reduce((a, p) => a + p.points, 0)),
+      entity: Math.max(0, 30 - penalties.filter((p) => /schema|platform/i.test(p.issue)).reduce((a, p) => a + p.points, 0)),
+      penalties,
+    }
+  };
 }
 function aiAudit(r) {
   const kws = r.content.topKeywords.slice(0, 12).map((x) => x.text);
   const hasFaq = r.schema.types.some((x) => /faq/i.test(x));
   const hasOrg = r.schema.types.some((x) => /organization/i.test(x));
   const hasWebsite = r.schema.types.some((x) => /website/i.test(x));
+  const canonicalMismatch = r.technical.canonicalHost && r.technical.canonicalHost !== r.host;
   const titleFocus = r.seo.title || "Missing title";
   const actions = [];
   if (!r.seo.h1.length) actions.push("Add one visible H1 that contains the brand plus the core offer, for example: BOOMERANG AUS Jackpot Casino Bonus.");
   if (!hasFaq) actions.push("Add FAQPage schema with answer-style questions around bonus terms, withdrawals, PayID, pokies, verification and eligibility.");
   if (!r.platforms.length) actions.push("Create entity profiles and link them from the site footer: Facebook, Instagram, X/Twitter, YouTube, LinkedIn and Trustpilot.");
-  if (!r.technical.canonical || String(r.technical.canonical).replace(/\/$/, "") !== r.finalUrl.replace(/\/$/, "")) actions.push(`Canonical points to ${r.technical.canonical || "nothing"}; verify it should consolidate to ${r.finalUrl}.`);
+  if (canonicalMismatch) actions.push(`Decide whether ${r.host} is a separate brand or an alias. Its canonical currently points to ${r.technical.canonicalHost}, so Google may index the other domain instead.`);
+  else if (!r.technical.canonical) actions.push(`Add a canonical tag that points to ${r.finalUrl}.`);
   if (r.technical.imagesMissingAlt > 0) actions.push(`Write descriptive ALT text for ${r.technical.imagesMissingAlt} images, prioritizing brand, game, bonus and payment images.`);
   return {
-    executiveSummary: `${r.host} has a usable SEO base, but its AEO/GEO entity layer is incomplete. The strongest visible terms are ${kws.slice(0, 8).join(", ") || "not enough readable content"}.`,
+    executiveSummary: canonicalMismatch
+      ? `${r.host} appears to be sending canonical authority to ${r.technical.canonicalHost}. That means a crawl can complete successfully while Google may still prefer the other domain for indexing and ranking.`
+      : `${r.host} has a domain-specific SEO base built around ${kws.slice(0, 5).join(", ") || "limited readable content"}, but its AEO/GEO entity layer still needs clearer answer blocks and corroborating platform signals.`,
     seoDiagnosis: [
       `Title focus: ${titleFocus}.`,
       `Meta description length is ${r.seo.descriptionLength}; ${r.seo.descriptionLength >= 70 && r.seo.descriptionLength <= 160 ? "this is usable" : "rewrite to 70-160 characters"}.`,
       r.seo.h1.length === 1 ? "H1 structure is clean." : `H1 problem: detected ${r.seo.h1.length}; use exactly one strong H1.`,
+      canonicalMismatch ? `Canonical mismatch: ${r.host} canonicalizes to ${r.technical.canonicalHost}.` : `Canonical target stays on ${r.host}.`,
       `Primary content terms detected: ${kws.slice(0, 10).join(", ") || "none"}.`
     ],
     aeoDiagnosis: [
@@ -254,12 +284,15 @@ async function audit(url) {
   const title = first(h, /<title\b[^>]*>([\s\S]*?)<\/title>/i), desc = meta(h, "description");
   const h1 = many(h, /<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, 12), h2 = many(h, /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi), h3 = many(h, /<h3\b[^>]*>([\s\S]*?)<\/h3>/gi);
   const linkList = links(h, base), schema = schemas(h), canonicalTag = (h.match(/<link\b[^>]*rel=["'][^"']*canonical[^"']*["'][^>]*>/i) || [])[0] || "";
+  const canonicalUrl = canonicalTag ? attr(canonicalTag, "href") || "" : "";
+  const canonicalAbsolute = canonicalUrl ? new URL(canonicalUrl, base).toString().replace(/\/$/, "") : "";
+  const canonicalHost = canonicalAbsolute ? hostOf(canonicalAbsolute) : "";
   const platforms = PLATFORMS.map(([platform, re]) => ({ platform, urls: linkList.filter((l) => re.test(l.href)).map((l) => l.href).slice(0, 5) })).filter((p) => p.urls.length);
   const img = h.match(/<img\b[^>]*>/gi) || [];
   const r = {
     url: input, finalUrl: base, host, fetchedAt: now(), latencyMs: Date.now() - start, httpStatus: p.status,
     seo: { title, titleLength: title.length, description: desc, descriptionLength: desc.length, keywords: meta(h, "keywords"), h1, h2, h3 },
-    technical: { canonical: canonicalTag ? attr(canonicalTag, "href") || true : "", robots: meta(h, "robots"), viewport: meta(h, "viewport"), images: img.length, imagesMissingAlt: img.filter((x) => !attr(x, "alt")).length },
+    technical: { canonical: canonicalAbsolute, canonicalHost, canonicalMatchesHost: !canonicalHost || canonicalHost === host, robots: meta(h, "robots"), viewport: meta(h, "viewport"), images: img.length, imagesMissingAlt: img.filter((x) => !attr(x, "alt")).length },
     openGraph: { present: /<meta\b[^>]*(property|name)=["']og:/i.test(h), title: meta(h, "og:title"), description: meta(h, "og:description"), image: meta(h, "og:image") },
     schema, links: { internal: linkList.filter((l) => !l.external).slice(0, 60), external: linkList.filter((l) => l.external).slice(0, 80) },
     platforms, content: { wordCount: (bodyText.match(/[a-z]{3,}/gi) || []).filter((w) => !noisyWord(w.toLowerCase())).length, topKeywords: cloud({ title, desc, h1, h2: h2.concat(h3), body: bodyText }) },
@@ -271,7 +304,7 @@ async function audit(url) {
   if (r.platforms.length < 3) actions.push("Create and link entity profiles on Facebook, Instagram, LinkedIn, YouTube, X/Twitter and Trustpilot.");
   if (r.content.wordCount < 300) actions.push("Add richer homepage content, FAQs, internal links, proof/trust sections and service summaries.");
   if (!r.openGraph.present) actions.push("Add OpenGraph title, description and image for entity clarity.");
-  r.score = sc.score; r.issues = sc.issues; r.aiAudit = aiAudit(r); r.recommendations = { actionPlan: actions.concat(r.aiAudit.priorityActions).filter((x, i, arr) => arr.indexOf(x) === i), summary: [`Detected focus keywords: ${r.content.topKeywords.slice(0, 8).map((x) => x.text).join(", ") || "not enough content"}.`, `Platforms detected: ${r.platforms.map((x) => x.platform).join(", ") || "none"}.`, `AEO/GEO readiness: ${r.schema.types.length ? "schema foundation exists" : "weak; schema missing"}.`] };
+  r.score = sc.score; r.scoreBreakdown = sc.breakdown; r.issues = sc.issues; r.aiAudit = aiAudit(r); r.recommendations = { actionPlan: actions.concat(r.aiAudit.priorityActions).filter((x, i, arr) => arr.indexOf(x) === i), summary: [`Detected focus keywords: ${r.content.topKeywords.slice(0, 8).map((x) => x.text).join(", ") || "not enough content"}.`, `Platforms detected: ${r.platforms.map((x) => x.platform).join(", ") || "none"}.`, `AEO/GEO readiness: ${r.schema.types.length ? "schema foundation exists" : "weak; schema missing"}.`] };
   return r;
 }
 async function saveAudit(env, url, keyword = "") {
@@ -281,6 +314,7 @@ async function saveAudit(env, url, keyword = "") {
   else await d.prepare("UPDATE targets SET keyword=?,status='processing',updated_at=datetime('now') WHERE id=?").bind(keyword, target.id).run();
   try {
     const report = await audit(u);
+    report.externalConnectors = await externalIntel(env, report);
     await d.batch([
       d.prepare("INSERT INTO domain_audits(target_id,url,host,status,score,report_json) VALUES(?,?,?,'completed',?,?)").bind(target.id, report.finalUrl, report.host, report.score, JSON.stringify(report)),
       d.prepare("UPDATE targets SET status='completed',updated_at=datetime('now') WHERE id=?").bind(target.id),
@@ -306,15 +340,60 @@ async function logs(req, env) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
   return j({ ok: true, logs: (await db(env).prepare("SELECT l.*,t.url,t.keyword,t.status target_status FROM monitor_logs l LEFT JOIN targets t ON t.id=l.target_id ORDER BY l.id DESC LIMIT 500").all()).results });
 }
+function connectorStatus(env) {
+  return CONNECTORS.map((c) => {
+    const base = String(env?.[c.env] || "").replace(/\/$/, "");
+    return { ...c, baseConfigured: !!base, status: base ? "configured" : "needs_self_hosted_endpoint" };
+  });
+}
+async function externalIntel(env, r) {
+  const out = connectorStatus(env).map((c) => ({ id: c.id, name: c.name, repo: c.repo, category: c.category, status: c.status, evidence: [] }));
+  const openSerpBase = String(env?.OPEN_SERP_BASE || "").replace(/\/$/, "");
+  if (openSerpBase) {
+    const item = out.find((x) => x.id === "openserp");
+    try {
+      const url = `${openSerpBase}/mega/search?engines=google,bing&text=${encodeURIComponent(r.host)}&extract=0&mode=any`;
+      const res = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(6000) });
+      item.status = res.ok ? "live" : `http_${res.status}`;
+      item.evidence = [(await res.text()).slice(0, 1200)];
+    } catch (e) {
+      item.status = "configured_but_unreachable";
+      item.evidence = [String(e.message || e)];
+    }
+  }
+  return out;
+}
+async function integrations(req, env) {
+  const a = await auth(req, env); if (!a.ok) return a.response;
+  return j({
+    ok: true,
+    connectors: connectorStatus(env),
+    note: "These are free open-source connectors. Cloudflare Workers cannot run their Python/Go/MCP crawlers directly, so each connector becomes active after you deploy that project as a self-hosted endpoint and add its base URL as a Worker secret or variable."
+  });
+}
+async function deleteTarget(req, env, id) {
+  const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
+  const d = db(env), targetId = Number(id);
+  if (!Number.isInteger(targetId) || targetId < 1) return err("Invalid target id", 422);
+  const row = await d.prepare("SELECT id,url FROM targets WHERE id=?").bind(targetId).first();
+  if (!row) return err("Target not found", 404);
+  await d.batch([
+    d.prepare("DELETE FROM domain_audits WHERE target_id=?").bind(targetId),
+    d.prepare("DELETE FROM monitor_logs WHERE target_id=?").bind(targetId),
+    d.prepare("DELETE FROM targets WHERE id=?").bind(targetId)
+  ]);
+  return j({ ok: true, deleted: row });
+}
 
 function page() {
   return `<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>SEO Monitor</title><style>
-  :root{color-scheme:dark;--bg:#020617;--p:#0f172a;--b:#263449;--t:#e5e7eb;--m:#94a3b8;--a:#deff9a;--c:#22d3ee}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#164e6333,transparent 35rem),var(--bg);color:var(--t);font-family:Inter,system-ui,sans-serif}.hide{display:none!important}.login{min-height:100vh;display:grid;place-items:center}.card,.panel{border:1px solid var(--b);background:#0f172ad9;border-radius:14px;padding:18px;box-shadow:0 24px 70px #0007}.card{width:min(430px,92vw)}input,button{font:inherit}input{width:100%;padding:12px;border:1px solid var(--b);border-radius:8px;background:#020617;color:var(--t)}label{display:block;color:var(--m);font-size:12px;font-weight:800;text-transform:uppercase;margin:14px 0 7px}.btn{border:1px solid #deff9a88;border-radius:8px;background:linear-gradient(135deg,var(--a),var(--c));padding:11px 15px;font-weight:900;color:#00111a;cursor:pointer}.btn:disabled{opacity:.65;cursor:wait}.btn2{background:#111827;color:var(--t);border-color:var(--b)}.shell{display:grid;grid-template-columns:250px 1fr;min-height:100vh}aside{border-right:1px solid var(--b);padding:22px;background:#020617cc}.brand{font-weight:900;letter-spacing:.08em;margin-bottom:28px}.nav{display:grid;gap:9px}.nav button{background:transparent;color:#bfdbfe;border:1px solid transparent;text-align:left;border-radius:8px;padding:11px;cursor:pointer}.nav .on{border-color:#deff9a66;background:#deff9a12;color:white}main{padding:28px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}h1{font-size:42px;margin:0}.muted{color:var(--m)}.grid{display:grid;grid-template-columns:1fr 1.6fr;gap:16px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{border:1px solid var(--b);border-radius:12px;padding:14px;background:#02061780}.metric b{display:block;font-size:28px;color:var(--a)}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid var(--b);padding:10px;text-align:left;vertical-align:top}th{color:var(--m);font-size:12px;text-transform:uppercase}.badge{border:1px solid #22d3ee66;color:var(--c);border-radius:99px;padding:3px 8px;font-size:12px}.view{display:none}.view.on{display:block}.words{display:flex;flex-wrap:wrap;gap:8px}.word{border:1px solid #334155;border-radius:99px;padding:5px 9px;background:#02061799}.report{border:1px solid var(--b);border-radius:12px;padding:12px;margin:9px 0;cursor:pointer}.split{display:grid;grid-template-columns:.8fr 1.2fr;gap:16px}pre{white-space:pre-wrap;color:#b9fbc0}@media(max-width:900px){.shell,.grid,.split,.metrics{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--b)}}  </style></head><body>
+  :root{color-scheme:dark;--bg:#020617;--p:#0f172a;--b:#263449;--t:#e5e7eb;--m:#94a3b8;--a:#deff9a;--c:#22d3ee}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#164e6333,transparent 35rem),var(--bg);color:var(--t);font-family:Inter,system-ui,sans-serif}.hide{display:none!important}.login{min-height:100vh;display:grid;place-items:center}.card,.panel{border:1px solid var(--b);background:#0f172ad9;border-radius:14px;padding:18px;box-shadow:0 24px 70px #0007}.card{width:min(430px,92vw)}input,button{font:inherit}input{width:100%;padding:12px;border:1px solid var(--b);border-radius:8px;background:#020617;color:var(--t)}label{display:block;color:var(--m);font-size:12px;font-weight:800;text-transform:uppercase;margin:14px 0 7px}.btn{border:1px solid #deff9a88;border-radius:8px;background:linear-gradient(135deg,var(--a),var(--c));padding:11px 15px;font-weight:900;color:#00111a;cursor:pointer}.btn:disabled{opacity:.65;cursor:wait}.btn2{background:#111827;color:var(--t);border-color:var(--b)}.mini{padding:6px 10px;font-size:12px}.danger{border-color:#fb718588;color:#fecaca}.shell{display:grid;grid-template-columns:250px 1fr;min-height:100vh}aside{border-right:1px solid var(--b);padding:22px;background:#020617cc}.brand{font-weight:900;letter-spacing:.08em;margin-bottom:28px}.nav{display:grid;gap:9px}.nav button{background:transparent;color:#bfdbfe;border:1px solid transparent;text-align:left;border-radius:8px;padding:11px;cursor:pointer}.nav .on{border-color:#deff9a66;background:#deff9a12;color:white}main{padding:28px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}h1{font-size:42px;margin:0}.muted{color:var(--m)}.grid{display:grid;grid-template-columns:1fr 1.6fr;gap:16px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{border:1px solid var(--b);border-radius:12px;padding:14px;background:#02061780}.metric b{display:block;font-size:28px;color:var(--a)}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid var(--b);padding:10px;text-align:left;vertical-align:top}th{color:var(--m);font-size:12px;text-transform:uppercase}.badge{border:1px solid #22d3ee66;color:var(--c);border-radius:99px;padding:3px 8px;font-size:12px}.view{display:none}.view.on{display:block}.words{display:flex;flex-wrap:wrap;gap:8px}.word{border:1px solid #334155;border-radius:99px;padding:5px 9px;background:#02061799}.report,.connector{border:1px solid var(--b);border-radius:12px;padding:12px;margin:9px 0;cursor:pointer}.connector{cursor:default}.split{display:grid;grid-template-columns:.8fr 1.2fr;gap:16px}pre{white-space:pre-wrap;color:#b9fbc0}@media(max-width:900px){.shell,.grid,.split,.metrics{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--b)}}  </style></head><body>
   <section id=login class=login><form id=lf class=card><div class=brand>SEO AEO GEO MONITOR</div><h2>Secure Login</h2><p class=muted>Full domain audit, keyword extraction, platform signals and optimization report.</p><label>Username</label><input id=u autocomplete=username required><label>Password</label><input id=p type=password autocomplete=current-password required><br><br><button id=lb class=btn>Enter Monitor</button><p id=le style=color:#fb7185></p></form></section>
-  <section id=app class="shell hide"><aside><div class=brand>SEO / AEO / GEO</div><div class=nav><button class=on data-v=dash>Dashboard</button><button data-v=audit>Domain Audit AI</button><button data-v=reports>Domain Reports</button><button data-v=admins>Admins</button></div></aside><main><div class=top><div><h1>SEO Monitor</h1><p class=muted>Input one domain, generate a domain-specific SEO/AEO/GEO intelligence report.</p></div><button id=out class="btn btn2">Logout</button></div>
-    <section id=dash class="view on"><div class=metrics><div class=metric>Domains<b id=mt>0</b></div><div class=metric>Reports<b id=mr>0</b></div><div class=metric>Latest Score<b id=ms>-</b></div><div class=metric>Status<b id=mst>-</b></div></div><br><div class=grid><div class=panel><h2>Domain Audit AI</h2><form id=tf><label>Domain / URL</label><input id=url placeholder=https://example.com required><br><br><button id=tb class=btn>Run AI Domain Audit</button><p id=te style=color:#fb7185></p></form></div><div class=panel><h2>Domain Targets</h2><table><thead><tr><th>URL</th><th>Status</th><th>Score</th></tr></thead><tbody id=targets></tbody></table></div></div><br><div class=panel><h2>Monitor Logs</h2><table><thead><tr><th>Checked</th><th>Target</th><th>Type</th><th>Result</th></tr></thead><tbody id=logs></tbody></table></div></section>
+  <section id=app class="shell hide"><aside><div class=brand>SEO / AEO / GEO</div><div class=nav><button class=on data-v=dash>Dashboard</button><button data-v=audit>Domain Audit AI</button><button data-v=reports>Domain Reports</button><button data-v=integrations>Open Source APIs</button><button data-v=admins>Admins</button></div></aside><main><div class=top><div><h1>SEO Monitor</h1><p class=muted>Input one domain, generate a domain-specific SEO/AEO/GEO intelligence report.</p></div><button id=out class="btn btn2">Logout</button></div>
+    <section id=dash class="view on"><div class=metrics><div class=metric>Domains<b id=mt>0</b></div><div class=metric>Reports<b id=mr>0</b></div><div class=metric>Latest Score<b id=ms>-</b></div><div class=metric>Status<b id=mst>-</b></div></div><br><div class=grid><div class=panel><h2>Domain Audit AI</h2><form id=tf><label>Domain / URL</label><input id=url placeholder=https://example.com required><br><br><button id=tb class=btn>Run AI Domain Audit</button><p id=te style=color:#fb7185></p></form></div><div class=panel><h2>Domain Targets</h2><table><thead><tr><th>URL</th><th>Status</th><th>Score</th><th>Action</th></tr></thead><tbody id=targets></tbody></table></div></div><br><div class=panel><h2>Monitor Logs</h2><table><thead><tr><th>Checked</th><th>Target</th><th>Type</th><th>Result</th></tr></thead><tbody id=logs></tbody></table></div></section>
     <section id=audit class=view><div class=panel><h2>Domain Audit AI Report</h2><div id=latest class=muted>Run a domain audit first.</div></div></section>
     <section id=reports class=view><div class=split><div class=panel><h2>Reports By Domain</h2><div id=rl></div></div><div class=panel><h2>Domain Report Detail</h2><div id=rd class=muted>Select a domain report.</div></div></div></section>
+    <section id=integrations class=view><div class=panel><h2>5 Free Open-source SEO/AEO/GEO Connectors</h2><p class=muted>These are wired as connector slots. A connector becomes live after that open-source project is deployed as a self-hosted API and its base URL is added to this Worker.</p><div id=connectorRows></div></div></section>
     <section id=admins class=view><div class=grid><div class=panel><h2>Create Admin</h2><form id=af><label>Email</label><input id=ae><label>Password</label><input id=ap type=password><br><br><button class=btn>Create Admin</button><p id=aa style=color:#fb7185></p></form></div><div class=panel><h2>Admins</h2><table><tbody id=adminRows></tbody></table></div></div></section>
   </main></section><script>
   const E=id=>document.getElementById(id), q=s=>document.querySelectorAll(s), eh=x=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
@@ -322,9 +401,9 @@ function page() {
   function nav(v){q(".nav button").forEach(b=>b.classList.toggle("on",b.dataset.v==v));q(".view").forEach(s=>s.classList.toggle("on",s.id==v))}
   q(".nav button").forEach(b=>b.onclick=()=>nav(b.dataset.v));function show(a){E("login").classList.toggle("hide",a);E("app").classList.toggle("hide",!a)}
   function list(title,arr){return '<h3>'+eh(title)+'</h3><ul>'+((arr&&arr.length)?arr.map(x=>'<li>'+eh(x)+'</li>').join(""):'<li class=muted>No signal detected.</li>')+'</ul>'}
-  function report(d){if(!d)return"No report yet";let ai=d.aiAudit||{};return '<div class=metrics><div class=metric>Score<b>'+d.score+'</b></div><div class=metric>Words<b>'+d.content.wordCount+'</b></div><div class=metric>Schemas<b>'+d.schema.types.length+'</b></div><div class=metric>Platforms<b>'+d.platforms.length+'</b></div></div><h3>AI Executive Summary</h3><p>'+eh(ai.executiveSummary||"AI audit is being generated from deterministic SEO/AEO/GEO rules.")+'</p>'+list("AI SEO Diagnosis",ai.seoDiagnosis)+list("AI AEO Diagnosis",ai.aeoDiagnosis)+list("AI GEO Diagnosis",ai.geoDiagnosis)+list("AI Priority Action Plan",ai.priorityActions)+'<h3>SEO Snapshot</h3><p><b>Title:</b> '+eh(d.seo.title||"Missing")+' ('+d.seo.titleLength+')</p><p><b>Description:</b> '+eh(d.seo.description||"Missing")+' ('+d.seo.descriptionLength+')</p><p><b>H1:</b> '+eh(d.seo.h1.join(" | ")||"Missing")+'</p><p><b>Schema:</b> '+eh(d.schema.types.join(", ")||"Missing")+'</p><p><b>Platforms:</b> '+eh(d.platforms.map(p=>p.platform).join(", ")||"None detected")+'</p><h3>Technical Issues</h3><ul>'+d.issues.map(x=>'<li>'+eh(x)+'</li>').join("")+'</ul><h3>Keyword Cloud</h3><div class=words>'+d.content.topKeywords.map(w=>'<span class=word title="count '+w.value+'">'+eh(w.text)+' '+w.score+'</span>').join("")+'</div><h3>Platform URLs</h3><pre>'+eh(d.platforms.flatMap(p=>p.urls.map(u=>p.platform+": "+u)).join("\\n")||"No major platform links detected.")+'</pre>'}
+  function report(d){if(!d)return"No report yet";let ai=d.aiAudit||{},b=d.scoreBreakdown||{},cx=d.externalConnectors||[];return '<div class=metrics><div class=metric>Score<b>'+d.score+'</b></div><div class=metric>Technical<b>'+(b.technical??"-")+'</b></div><div class=metric>Content<b>'+(b.content??"-")+'</b></div><div class=metric>Entity<b>'+(b.entity??"-")+'</b></div></div><h3>AI Executive Summary</h3><p>'+eh(ai.executiveSummary||"AI audit is being generated from deterministic SEO/AEO/GEO rules.")+'</p>'+list("AI SEO Diagnosis",ai.seoDiagnosis)+list("AI AEO Diagnosis",ai.aeoDiagnosis)+list("AI GEO Diagnosis",ai.geoDiagnosis)+list("AI Priority Action Plan",ai.priorityActions)+'<h3>SEO Snapshot</h3><p><b>Title:</b> '+eh(d.seo.title||"Missing")+' ('+d.seo.titleLength+')</p><p><b>Description:</b> '+eh(d.seo.description||"Missing")+' ('+d.seo.descriptionLength+')</p><p><b>H1:</b> '+eh(d.seo.h1.join(" | ")||"Missing")+'</p><p><b>Canonical:</b> '+eh(d.technical.canonical||"Missing")+'</p><p><b>Schema:</b> '+eh(d.schema.types.join(", ")||"Missing")+'</p><p><b>Platforms:</b> '+eh(d.platforms.map(p=>p.platform).join(", ")||"None detected")+'</p><h3>Technical Issues</h3><ul>'+d.issues.map(x=>'<li>'+eh(x)+'</li>').join("")+'</ul><h3>Keyword Cloud</h3><div class=words>'+d.content.topKeywords.map(w=>'<span class=word title="count '+w.value+' | bias '+w.location_bias+'">'+eh(w.text)+' '+w.score+'</span>').join("")+'</div><h3>Open-source Connector Evidence</h3><div>'+cx.map(c=>'<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(c.status)+'</span><p class=muted>'+eh(c.category||"")+'</p><a style=color:#93c5fd href="'+eh(c.repo)+'" target=_blank>'+eh(c.repo)+'</a></div>').join("")+'</div><h3>Platform URLs</h3><pre>'+eh(d.platforms.flatMap(p=>p.urls.map(u=>p.platform+": "+u)).join("\\n")||"No major platform links detected.")+'</pre>'}
   function groupedReports(rows){let g={};rows.forEach(x=>{(g[x.host]=g[x.host]||[]).push(x)});return Object.entries(g).map(([host,items])=>'<div class=report data-id='+items[0].id+'><b>'+eh(host)+'</b><p class=muted>'+items.length+' reports | latest '+eh(items[0].created_at)+' | score '+items[0].score+'</p><small class=muted>'+items.slice(0,4).map(x=>eh(x.created_at)+' score '+x.score).join('<br>')+'</small></div>').join("")}
-  async function load(){let [t,l,r,a]=await Promise.all([api("/api/targets"),api("/api/logs"),api("/api/reports"),api("/api/admins")]);E("mt").textContent=t.targets.length;E("mr").textContent=r.reports.length;E("ms").textContent=r.reports[0]?.score??"-";E("mst").textContent=r.reports[0]?.status??"-";E("targets").innerHTML=t.targets.length?t.targets.map(x=>'<tr><td>'+eh(x.url)+'</td><td><span class=badge>'+eh(x.status)+'</span></td><td>'+eh(x.latest_score??"-")+'</td></tr>').join(""):'<tr><td colspan=3 class=muted>No domains yet.</td></tr>';E("logs").innerHTML=l.logs.length?l.logs.map(x=>'<tr><td>'+eh(x.checked_at)+'</td><td>'+eh(x.url||"-")+'</td><td>'+eh(x.platform)+'</td><td>'+eh(x.rank_or_mention)+'<br><span class=muted>'+eh(x.response_snippet)+'</span></td></tr>').join(""):'<tr><td colspan=4 class=muted>No logs yet.</td></tr>';E("rl").innerHTML=r.reports.length?groupedReports(r.reports):'<p class=muted>No reports yet.</p>';q(".report").forEach(x=>x.onclick=async()=>{let d=await api("/api/reports/"+x.dataset.id);E("rd").innerHTML=report(d.report.data);nav("reports")});E("adminRows").innerHTML=a.admins.map(x=>'<tr><td>'+eh(x.username)+'</td><td>'+eh(x.role)+'</td><td>'+eh(x.created_at)+'</td></tr>').join("");if(r.reports[0]){let d=await api("/api/reports/"+r.reports[0].id);E("latest").innerHTML=report(d.report.data)}}
+  async function load(){let [t,l,r,a,i]=await Promise.all([api("/api/targets"),api("/api/logs"),api("/api/reports"),api("/api/admins"),api("/api/integrations")]);E("mt").textContent=t.targets.length;E("mr").textContent=r.reports.length;E("ms").textContent=r.reports[0]?.score??"-";E("mst").textContent=r.reports[0]?.status??"-";E("targets").innerHTML=t.targets.length?t.targets.map(x=>'<tr><td>'+eh(x.url)+'</td><td><span class=badge>'+eh(x.status)+'</span></td><td>'+eh(x.latest_score??"-")+'</td><td><button class="btn btn2 danger mini" data-del="'+x.id+'">Delete</button></td></tr>').join(""):'<tr><td colspan=4 class=muted>No domains yet.</td></tr>';q("[data-del]").forEach(b=>b.onclick=async()=>{if(!confirm("Delete this domain and all its reports?"))return;b.disabled=1;try{await api("/api/targets/"+b.dataset.del,{method:"DELETE"});await load()}catch(e){alert(e.message||"Delete failed")}finally{b.disabled=0}});E("logs").innerHTML=l.logs.length?l.logs.map(x=>'<tr><td>'+eh(x.checked_at)+'</td><td>'+eh(x.url||"-")+'</td><td>'+eh(x.platform)+'</td><td>'+eh(x.rank_or_mention)+'<br><span class=muted>'+eh(x.response_snippet)+'</span></td></tr>').join(""):'<tr><td colspan=4 class=muted>No logs yet.</td></tr>';E("rl").innerHTML=r.reports.length?groupedReports(r.reports):'<p class=muted>No reports yet.</p>';q(".report").forEach(x=>x.onclick=async()=>{let d=await api("/api/reports/"+x.dataset.id);E("rd").innerHTML=report(d.report.data);nav("reports")});E("connectorRows").innerHTML=i.connectors.map(c=>'<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(c.status)+'</span><p class=muted>'+eh(c.category)+' | '+eh(c.mode)+' | env '+eh(c.env)+'</p><a style=color:#93c5fd href="'+eh(c.repo)+'" target=_blank>'+eh(c.repo)+'</a></div>').join("");E("adminRows").innerHTML=a.admins.map(x=>'<tr><td>'+eh(x.username)+'</td><td>'+eh(x.role)+'</td><td>'+eh(x.created_at)+'</td></tr>').join("");if(r.reports[0]){let d=await api("/api/reports/"+r.reports[0].id);E("latest").innerHTML=report(d.report.data)}}
   E("lf").onsubmit=async e=>{e.preventDefault();E("le").textContent="";E("lb").disabled=1;try{await api("/api/login",{method:"POST",body:JSON.stringify({username:E("u").value.trim(),password:E("p").value})});show(1);await load()}catch(x){E("le").textContent=x.message||"Login failed"}finally{E("lb").disabled=0}}
   E("tf").onsubmit=async e=>{e.preventDefault();E("tb").disabled=1;E("te").textContent="AI audit running...";try{let x=await api("/api/targets",{method:"POST",body:JSON.stringify({url:E("url").value})});E("tf").reset();E("latest").innerHTML=report(x.report);nav("audit");await load();E("te").textContent=""}catch(x){E("te").textContent=x.message}finally{E("tb").disabled=0}}
   E("af").onsubmit=async e=>{e.preventDefault();try{await api("/api/admins",{method:"POST",body:JSON.stringify({username:E("ae").value,password:E("ap").value})});E("af").reset();await load()}catch(x){E("aa").textContent=x.message}}
@@ -340,6 +419,8 @@ async function route(req, env) {
   if (p === "/api/logout" && req.method === "POST") return logout(req, env);
   if (p === "/api/session") return j({ ok: true, authenticated: !!(await user(req, env)), user: await user(req, env) });
   if (p === "/api/admins") return admins(req, env);
+  if (p === "/api/integrations") return integrations(req, env);
+  if (p.startsWith("/api/targets/") && req.method === "DELETE") return deleteTarget(req, env, p.split("/").pop());
   if (p === "/api/targets") return targets(req, env);
   if (p === "/api/logs") return logs(req, env);
   if (p === "/api/reports") return reports(req, env);
