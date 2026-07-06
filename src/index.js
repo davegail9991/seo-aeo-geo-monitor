@@ -7,7 +7,8 @@ const COOKIE = "seo_monitor_session";
 const SALT = "seo-monitor-admin-v1";
 const DEFAULT_USER = "admin@seomonitor.app";
 const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json".split(" "));
+const APP_VERSION = "2026-07-06-keyword-clean-v3";
+const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json http www com net org cdn b-cdn media asset assets static upload uploads file files png jpg jpeg webp svg gif ico woff woff2 css js min api app wp admin cache font fonts data base64 charset meta link rel important color padding none display background background-color background-image border border-radius solid margin transform auto linear-gradient position flex top table center rgba px rem em vh vw calc var text align shadow cursor pointer nth child gap bottom widget bannerurl gamebanner fff deg para por btn div span size footer goldgroup radius box awc linear left gradient container weight dropdown right name block favor board img download wrapper title history max item items scale transparent swal active kho untuk pagetitle metadesc metatag overflow swiper".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
   ["linkedin", /linkedin\.com/i], ["youtube", /youtube\.com/i], ["tiktok", /tiktok\.com/i],
@@ -147,11 +148,46 @@ function schemas(h) {
   }
   return { count, types: [...types] };
 }
+function readableHtml(h) {
+  h = String(h || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<template[\s\S]*?<\/template>/gi, " ");
+  const chunks = [];
+  const pick = /<(p|li|h[1-3])\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m;
+  while ((m = pick.exec(h)) && chunks.length < 220) chunks.push(m[2]);
+  return chunks.length ? chunks.join(" ") : h;
+}
+function noisyWord(word) {
+  return STOP.has(word)
+    || word.length < 3
+    || word.length > 28
+    || !/[aeiou]/i.test(word)
+    || word.includes("-")
+    || /^u[0-9a-f]{4,6}$/i.test(word)
+    || /^[0-9]+$/.test(word)
+    || /[a-z]+\d|\d[a-z]/i.test(word)
+    || word.includes("-gradient")
+    || word.endsWith("-color")
+    || word.endsWith("-image")
+    || word.endsWith("-radius")
+    || word.endsWith("-size")
+    || word.endsWith("url")
+    || word.endsWith("widget")
+    || /^[bcdfghjklmnpqrstvwxyz-]{5,}$/i.test(word)
+    || /^(x|xx|xxx|btn|svg|path|fill|none|true|false)$/i.test(word);
+}
 function cloud(fields) {
   const map = new Map(), add = (txt, w, loc) => {
-    for (const word of (String(txt || "").toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) || [])) {
-      if (STOP.has(word) || word.length > 28 || /^u[0-9a-f]{4}$/i.test(word) || /^[0-9]+$/.test(word)) continue;
-      const x = map.get(word) || { text: word, value: 0, score: 0, loc: new Set() };
+    const cleanTxt = String(txt || "").replace(/\\u[0-9a-f]{4,6}/gi, " ").replace(/https?:\/\/\S+/gi, " ");
+    for (const word of (cleanTxt.toLowerCase().match(/[a-z]{3,}/g) || [])) {
+      if (noisyWord(word)) continue;
+      const x = map.get(word) || { text: word, value: 0, score: 0, body: 0, loc: new Set() };
+      if (loc === "body" && x.body >= 12) continue;
+      if (loc === "body") x.body++;
       x.value++; x.score += w; x.loc.add(loc); map.set(word, x);
     }
   };
@@ -181,7 +217,7 @@ async function audit(url) {
   const input = norm(url); if (!input) throw new Error("Invalid domain");
   const start = Date.now(), p = await fetchPage(input), h = p.html, base = p.finalUrl || input, host = new URL(base).hostname.replace(/^www\./, "");
   const bodyHtml = first(h, /<body\b[^>]*>([\s\S]*?)<\/body>/i) || h;
-  const bodyText = text(bodyHtml.replace(/<nav[\s\S]*?<\/nav>/gi, " ").replace(/<footer[\s\S]*?<\/footer>/gi, " "));
+  const bodyText = text(readableHtml(bodyHtml.replace(/<nav[\s\S]*?<\/nav>/gi, " ").replace(/<footer[\s\S]*?<\/footer>/gi, " ").replace(/<aside[\s\S]*?<\/aside>/gi, " ")));
   const title = first(h, /<title\b[^>]*>([\s\S]*?)<\/title>/i), desc = meta(h, "description");
   const h1 = many(h, /<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, 12), h2 = many(h, /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi), h3 = many(h, /<h3\b[^>]*>([\s\S]*?)<\/h3>/gi);
   const linkList = links(h, base), schema = schemas(h), canonicalTag = (h.match(/<link\b[^>]*rel=["'][^"']*canonical[^"']*["'][^>]*>/i) || [])[0] || "";
@@ -193,7 +229,7 @@ async function audit(url) {
     technical: { canonical: canonicalTag ? attr(canonicalTag, "href") || true : "", robots: meta(h, "robots"), viewport: meta(h, "viewport"), images: img.length, imagesMissingAlt: img.filter((x) => !attr(x, "alt")).length },
     openGraph: { present: /<meta\b[^>]*(property|name)=["']og:/i.test(h), title: meta(h, "og:title"), description: meta(h, "og:description"), image: meta(h, "og:image") },
     schema, links: { internal: linkList.filter((l) => !l.external).slice(0, 60), external: linkList.filter((l) => l.external).slice(0, 80) },
-    platforms, content: { wordCount: (bodyText.match(/[a-z0-9][a-z0-9-]{2,}/gi) || []).length, topKeywords: cloud({ title, desc, h1, h2: h2.concat(h3), body: bodyText }) },
+    platforms, content: { wordCount: (bodyText.match(/[a-z]{3,}/gi) || []).filter((w) => !noisyWord(w.toLowerCase())).length, topKeywords: cloud({ title, desc, h1, h2: h2.concat(h3), body: bodyText }) },
   };
   const sc = score(r);
   const actions = [];
@@ -273,7 +309,7 @@ async function route(req, env) {
   if (p === "/api/logs") return logs(req, env);
   if (p === "/api/reports") return reports(req, env);
   if (p.startsWith("/api/reports/")) return reports(req, env, p.split("/").pop());
-  if (p === "/health") return j({ ok: true, service: "seo-aeo-geo-monitor" });
+  if (p === "/health") return j({ ok: true, service: "seo-aeo-geo-monitor", version: APP_VERSION });
   return err("Not found", 404);
 }
 
