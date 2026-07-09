@@ -7,7 +7,7 @@ const COOKIE = "seo_monitor_session";
 const SALT = "seo-monitor-admin-v1";
 const DEFAULT_USER = "admin@seomonitor.app";
 const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const APP_VERSION = "2026-07-06-domain-ai-v8";
+const APP_VERSION = "2026-07-06-domain-ai-v9";
 const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json http www com net org cdn b-cdn media asset assets static upload uploads file files png jpg jpeg webp svg gif ico woff woff2 css js min api app wp admin cache font fonts data base64 charset meta link rel important color padding none display background background-color background-image border border-radius solid margin transform auto linear-gradient position flex top table center rgba px rem em vh vw calc var text align shadow cursor pointer nth child gap bottom widget bannerurl gamebanner fff deg para por btn div span size footer goldgroup radius box awc linear left gradient container weight dropdown right name block favor board img download wrapper title history max item items scale transparent swal active kho untuk pagetitle metadesc metatag overflow swiper".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
@@ -368,7 +368,15 @@ async function targets(req, env) {
 }
 async function reports(req, env, id) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
-  if (id) { const r = await db(env).prepare("SELECT * FROM domain_audits WHERE id=?").bind(id).first(); return r ? j({ ok: true, report: { ...r, data: JSON.parse(r.report_json) } }) : err("Report not found", 404); }
+  if (id) {
+    const r = await db(env).prepare("SELECT * FROM domain_audits WHERE id=?").bind(id).first();
+    if (!r) return err("Report not found", 404);
+    const data = JSON.parse(r.report_json);
+    if (!data.growthPlan) data.growthPlan = growthPlan(data);
+    if (!data.recommendations) data.recommendations = {};
+    if (!data.recommendations.registrationPlan) data.recommendations.registrationPlan = data.growthPlan;
+    return j({ ok: true, report: { ...r, data } });
+  }
   const rows = (await db(env).prepare("SELECT a.id,a.target_id,a.url,a.host,a.status,a.score,a.created_at,t.url target_url FROM domain_audits a LEFT JOIN targets t ON t.id=a.target_id ORDER BY a.id DESC LIMIT 100").all()).results || [];
   return j({ ok: true, reports: rows.map((x) => ({ ...x, display_host: hostOf(x.target_url || x.url) || x.host })) });
 }
