@@ -1,6 +1,7 @@
 const COOKIE = "seo_monitor_session";
 const LEGACY_SALT = "seo-monitor-admin-v1";
-const PBKDF2_ITERATIONS = 210000;
+// Cloudflare Workers WebCrypto currently caps PBKDF2 at 100,000 iterations.
+const PBKDF2_ITERATIONS = 100000;
 const APP_VERSION = "2026-07-13-security-performance-v13";
 const JSON_BODY_LIMIT = 32 * 1024;
 const LOGIN_BODY_LIMIT = 8 * 1024;
