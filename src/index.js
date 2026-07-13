@@ -1,13 +1,26 @@
-const H = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
 const COOKIE = "seo_monitor_session";
-const SALT = "seo-monitor-admin-v1";
-const DEFAULT_USER = "admin@seomonitor.app";
-const DEFAULT_HASH = "b0e7d521a39a77a1cbcd37fefd979919bb33f38dbe948edfb6be2d7cb76cdf02";
-const APP_VERSION = "2026-07-12-open-source-connectors-v12";
+const LEGACY_SALT = "seo-monitor-admin-v1";
+const PBKDF2_ITERATIONS = 210000;
+const APP_VERSION = "2026-07-13-security-performance-v13";
+const JSON_BODY_LIMIT = 32 * 1024;
+const LOGIN_BODY_LIMIT = 8 * 1024;
+const LOGIN_WINDOW_SECONDS = 15 * 60;
+const LOGIN_FAILURE_LIMIT = 5;
+const LOGIN_IP_FAILURE_LIMIT = 20;
+const AUDIT_LOCK_SECONDS = 2 * 60;
+const SECURITY_HEADERS = {
+  "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "origin-agent-cluster": "?1",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "x-permitted-cross-domain-policies": "none",
+  "x-xss-protection": "0",
+};
 const STOP = new Set("about above after again all also and are because been before being below both but can click contact copyright could details does down each from have having here home into just learn login menu more only other our page please privacy read search site than that the their them then there these they this those through under using view was were what when where which while with your null true false undefined function const return async await class window document script style html body data image icon content width height href https http src var let json http www com net org cdn b-cdn media asset assets static upload uploads file files png jpg jpeg webp svg gif ico woff woff2 css js min api app wp admin cache font fonts data base64 charset meta link rel important color padding none display background background-color background-image border border-radius solid margin transform auto linear-gradient position flex top table center rgba px rem em vh vw calc var text align shadow cursor pointer nth child gap bottom widget bannerurl gamebanner fff deg para por btn div span size footer goldgroup radius box awc linear left gradient container weight dropdown right name block favor board img download wrapper title history max item items scale transparent swal active kho untuk pagetitle metadesc metatag overflow swiper".split(" "));
 const PLATFORMS = [
   ["facebook", /facebook\.com/i], ["instagram", /instagram\.com/i], ["x-twitter", /(twitter\.com|x\.com)/i],
@@ -39,9 +52,18 @@ const CONNECTORS = [
   { id: "aeo-audit", name: "Canonry AEO Audit", category: "AEO technical audit: 16 answer-engine citation factors", repo: "https://github.com/Canonry/aeo-audit", env: "AEO_AUDIT_BASE", mode: "Programmatic API / npx JSON bridge" },
 ];
 
-const j = (x, s = 200, h = {}) => new Response(JSON.stringify(x), { status: s, headers: { ...H, ...h, "content-type": "application/json;charset=utf-8" } });
+class HttpError extends Error {
+  constructor(message, status = 400, headers = {}) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+    this.headers = headers;
+  }
+}
+
+const j = (x, s = 200, h = {}) => new Response(JSON.stringify(x), { status: s, headers: { ...h, "content-type": "application/json;charset=utf-8" } });
 const html = (x) => new Response(x, { headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" } });
-const err = (m, s = 400) => j({ ok: false, error: m }, s);
+const err = (m, s = 400, h = {}) => j({ ok: false, error: m }, s, h);
 const db = (env) => env.seo_monitor_db || env.DB;
 const now = () => new Date().toISOString();
 function hostOf(x = "") {
@@ -54,11 +76,45 @@ const esc = (x = "") => String(x).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<
 function norm(x) {
   try {
     const u = new URL(String(x || "").match(/^https?:\/\//) ? x : `https://${x}`);
+    if (!/^https?:$/.test(u.protocol)) return "";
     u.hash = "";
     return u.toString().replace(/\/$/, "");
   } catch { return ""; }
 }
-async function body(req) { try { return await req.json(); } catch { return {}; } }
+async function readBodyBytes(req, limit) {
+  const declared = Number(req.headers.get("content-length") || 0);
+  if (Number.isFinite(declared) && declared > limit) {
+    await req.body?.cancel().catch(() => {});
+    throw new HttpError("Request body too large", 413);
+  }
+  if (!req.body) return new Uint8Array();
+  const reader = req.body.getReader(), chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => {});
+        throw new HttpError("Request body too large", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+async function body(req, limit = JSON_BODY_LIMIT) {
+  const bytes = await readBodyBytes(req, limit);
+  if (!bytes.byteLength) return {};
+  try { return JSON.parse(new TextDecoder().decode(bytes)); }
+  catch { throw new HttpError("Invalid JSON body", 400); }
+}
 function cookie(req, name) {
   const p = `${name}=`;
   return (req.headers.get("cookie") || "").split(";").map((x) => x.trim()).find((x) => x.startsWith(p))?.slice(p.length) || "";
@@ -67,6 +123,11 @@ function b64(bytes) {
   let s = "";
   for (const b of bytes) s += String.fromCharCode(b);
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function unb64(value) {
+  const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
 async function sha(x) {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(x));
@@ -78,59 +139,161 @@ function eq(a, b) {
   for (let i = 0; i < a.length; i++) v |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return v === 0;
 }
+async function pbkdf2(password, salt, iterations = PBKDF2_ITERATIONS) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256);
+  return new Uint8Array(bits);
+}
+async function hashPassword(password) {
+  const salt = new Uint8Array(16); crypto.getRandomValues(salt);
+  return `pbkdf2-sha256$${PBKDF2_ITERATIONS}$${b64(salt)}$${b64(await pbkdf2(password, salt))}`;
+}
+async function verifyPassword(stored, password) {
+  const value = String(stored || "");
+  if (/^[a-f0-9]{64}$/i.test(value)) return { valid: eq(await sha(`${LEGACY_SALT}:${password}`), value.toLowerCase()), legacy: true };
+  const parts = value.split("$");
+  if (parts.length !== 4 || parts[0] !== "pbkdf2-sha256") return { valid: false, legacy: false };
+  const iterations = Number(parts[1]);
+  if (!Number.isInteger(iterations) || iterations < 100000 || iterations > 1000000) return { valid: false, legacy: false };
+  try {
+    const salt = unb64(parts[2]), expected = unb64(parts[3]);
+    if (salt.byteLength < 16 || expected.byteLength !== 32) return { valid: false, legacy: false };
+    return { valid: eq(b64(await pbkdf2(password, salt, iterations)), b64(expected)), legacy: false };
+  } catch { return { valid: false, legacy: false }; }
+}
+async function consumeDummyPasswordWork(password) {
+  await pbkdf2(password, new Uint8Array(16));
+}
 
-async function tables(env) {
-  const d = db(env);
-  if (!d) throw new Error("D1 binding missing");
+const initializedBindings = new WeakMap();
+async function initializeTables(env, d) {
   await d.batch([
     d.prepare("CREATE TABLE IF NOT EXISTS targets(id INTEGER PRIMARY KEY,url TEXT NOT NULL UNIQUE,keyword TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT(datetime('now')),updated_at TEXT NOT NULL DEFAULT(datetime('now')))"),
-    d.prepare("CREATE TABLE IF NOT EXISTS monitor_logs(id INTEGER PRIMARY KEY,target_id INTEGER,platform TEXT NOT NULL,rank_or_mention TEXT NOT NULL,response_snippet TEXT,checked_at TEXT NOT NULL DEFAULT(datetime('now')))"),
-    d.prepare("CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,username TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),expires_at TEXT NOT NULL)"),
     d.prepare("CREATE TABLE IF NOT EXISTS admin_users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'admin',created_at TEXT NOT NULL DEFAULT(datetime('now')))"),
-    d.prepare("CREATE TABLE IF NOT EXISTS domain_audits(id INTEGER PRIMARY KEY,target_id INTEGER,url TEXT NOT NULL,host TEXT NOT NULL,status TEXT NOT NULL,score INTEGER NOT NULL,report_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')))"),
+    d.prepare("CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,username TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),expires_at TEXT NOT NULL,FOREIGN KEY(username) REFERENCES admin_users(username) ON UPDATE CASCADE ON DELETE CASCADE)"),
     d.prepare("CREATE TABLE IF NOT EXISTS connector_settings(id TEXT PRIMARY KEY,base_url TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT(datetime('now')))"),
-    d.prepare("CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status)"),
-    d.prepare("CREATE INDEX IF NOT EXISTS idx_audits_host ON domain_audits(host)"),
-    d.prepare("CREATE INDEX IF NOT EXISTS idx_audits_created ON domain_audits(created_at)")
+    d.prepare("CREATE TABLE IF NOT EXISTS login_attempts(key_hash TEXT PRIMARY KEY,failures INTEGER NOT NULL DEFAULT 0,window_started INTEGER NOT NULL,blocked_until INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)"),
+    d.prepare("CREATE TABLE IF NOT EXISTS audit_locks(host TEXT PRIMARY KEY,lock_token TEXT NOT NULL,expires_at INTEGER NOT NULL,created_at INTEGER NOT NULL)"),
+    d.prepare("CREATE TABLE IF NOT EXISTS monitor_logs(id INTEGER PRIMARY KEY,target_id INTEGER,platform TEXT NOT NULL,rank_or_mention TEXT NOT NULL,response_snippet TEXT,checked_at TEXT NOT NULL DEFAULT(datetime('now')),FOREIGN KEY(target_id) REFERENCES targets(id) ON DELETE SET NULL)"),
+    d.prepare("CREATE TABLE IF NOT EXISTS domain_audits(id INTEGER PRIMARY KEY,target_id INTEGER,url TEXT NOT NULL,host TEXT NOT NULL,normalized_host TEXT NOT NULL,status TEXT NOT NULL,score INTEGER NOT NULL DEFAULT 0,report_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),FOREIGN KEY(target_id) REFERENCES targets(id) ON DELETE SET NULL)")
   ]);
-  const user = await d.prepare("SELECT id FROM admin_users LIMIT 1").first();
-  if (!user) await d.prepare("INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,'owner')").bind(DEFAULT_USER, DEFAULT_HASH).run();
+
+  let auditColumns = (await d.prepare("PRAGMA table_info(domain_audits)").all()).results || [];
+  if (!auditColumns.some((column) => column.name === "host")) {
+    await d.prepare("ALTER TABLE domain_audits ADD COLUMN host TEXT").run();
+    if (auditColumns.some((column) => column.name === "normalized_host")) await d.prepare("UPDATE domain_audits SET host=normalized_host WHERE host IS NULL").run();
+    auditColumns = (await d.prepare("PRAGMA table_info(domain_audits)").all()).results || [];
+  }
+  if (!auditColumns.some((column) => column.name === "normalized_host")) {
+    await d.prepare("ALTER TABLE domain_audits ADD COLUMN normalized_host TEXT").run();
+    await d.prepare("UPDATE domain_audits SET normalized_host=host WHERE normalized_host IS NULL").run();
+  }
+  await d.prepare("DROP INDEX IF EXISTS idx_domain_audits_host").run();
+  await d.batch([
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_targets_updated_at ON targets(updated_at)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_monitor_logs_target_id ON monitor_logs(target_id)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_monitor_logs_checked_at ON monitor_logs(checked_at)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_domain_audits_host ON domain_audits(host)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_domain_audits_created_at ON domain_audits(created_at)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_domain_audits_target_id ON domain_audits(target_id)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_login_attempts_updated_at ON login_attempts(updated_at)"),
+    d.prepare("CREATE INDEX IF NOT EXISTS idx_audit_locks_expires_at ON audit_locks(expires_at)")
+  ]);
+
+  const existingUser = await d.prepare("SELECT id FROM admin_users LIMIT 1").first();
+  if (!existingUser && env.ADMIN_BOOTSTRAP_PASSWORD) {
+    const password = String(env.ADMIN_BOOTSTRAP_PASSWORD), username = String(env.ADMIN_BOOTSTRAP_USER || "admin").trim();
+    if (password.length < 14 || password.length > 1024 || !username || username.length > 254) throw new Error("Invalid admin bootstrap configuration");
+    await d.prepare("INSERT OR IGNORE INTO admin_users(username,password_hash,role) VALUES(?,?,'owner')").bind(username, await hashPassword(password)).run();
+  }
+}
+async function tables(env) {
+  const d = db(env);
+  if (!d || (typeof d !== "object" && typeof d !== "function")) throw new Error("D1 binding missing");
+  let pending = initializedBindings.get(d);
+  if (!pending) {
+    pending = initializeTables(env, d);
+    initializedBindings.set(d, pending);
+    pending.catch(() => initializedBindings.delete(d));
+  }
+  await pending;
+  return d;
 }
 async function user(req, env) {
   const tok = cookie(req, COOKIE);
   if (!tok) return null;
-  await tables(env);
-  const row = await db(env).prepare("SELECT username FROM auth_sessions WHERE token_hash=? AND expires_at>datetime('now')").bind(await sha(tok)).first();
-  return row ? { username: row.username } : null;
+  const d = await tables(env);
+  const row = await d.prepare("SELECT u.username,u.role FROM auth_sessions s JOIN admin_users u ON u.username=s.username WHERE s.token_hash=? AND s.expires_at>datetime('now')").bind(await sha(tok)).first();
+  return row ? { username: row.username, role: row.role } : null;
 }
 async function auth(req, env) {
   const u = await user(req, env);
   return u ? { ok: true, user: u } : { ok: false, response: err("Unauthorized", 401) };
 }
 
+async function recordLoginFailure(d, keyHash, epoch, cutoff, limit) {
+  const result = await d.prepare("INSERT INTO login_attempts(key_hash,failures,window_started,blocked_until,updated_at) VALUES(?,1,?,0,?) ON CONFLICT(key_hash) DO UPDATE SET failures=CASE WHEN login_attempts.window_started<=? THEN 1 ELSE login_attempts.failures+1 END,window_started=CASE WHEN login_attempts.window_started<=? THEN excluded.window_started ELSE login_attempts.window_started END,blocked_until=CASE WHEN login_attempts.window_started<=? THEN 0 WHEN login_attempts.failures+1>=? THEN ? ELSE login_attempts.blocked_until END,updated_at=excluded.updated_at RETURNING failures,window_started,blocked_until").bind(keyHash, epoch, epoch, cutoff, cutoff, cutoff, limit, epoch + LOGIN_WINDOW_SECONDS).all();
+  return result.results?.[0] || d.prepare("SELECT failures,window_started,blocked_until FROM login_attempts WHERE key_hash=?").bind(keyHash).first();
+}
+
+function loginRateLimitResponse(states, epoch) {
+  const blocked = states.find((state) => Number(state?.blocked_until || 0) > epoch);
+  return blocked ? err("Too many login attempts", 429, { "retry-after": String(Math.max(1, Number(blocked.blocked_until) - epoch)) }) : null;
+}
+
 async function login(req, env) {
-  await tables(env);
-  const b = await body(req), username = String(b.username || "").trim(), password = String(b.password || "");
-  const row = await db(env).prepare("SELECT username,password_hash FROM admin_users WHERE lower(username)=lower(?)").bind(username).first();
-  if (!row || !eq(await sha(`${SALT}:${password}`), String(row.password_hash).toLowerCase())) return err("Invalid login", 401);
+  const d = await tables(env), b = await body(req, LOGIN_BODY_LIMIT);
+  const username = String(b.username || "").trim(), password = String(b.password || "");
+  const normalizedUsername = username.toLowerCase().slice(0, 254);
+  const clientIp = req.headers.get("cf-connecting-ip") || "unknown";
+  const keyHash = await sha(`user\n${clientIp}\n${normalizedUsername}`), ipKeyHash = await sha(`ip\n${clientIp}`), epoch = Math.floor(Date.now() / 1000), cutoff = epoch - LOGIN_WINDOW_SECONDS;
+  await d.prepare("DELETE FROM login_attempts WHERE updated_at<?").bind(epoch - 86400).run();
+  await d.prepare("DELETE FROM auth_sessions WHERE expires_at<=datetime('now')").run();
+  const [attempt, ipAttempt] = await Promise.all([
+    d.prepare("SELECT failures,blocked_until FROM login_attempts WHERE key_hash=?").bind(keyHash).first(),
+    d.prepare("SELECT failures,blocked_until FROM login_attempts WHERE key_hash=?").bind(ipKeyHash).first()
+  ]);
+  const preflightLimit = loginRateLimitResponse([attempt, ipAttempt], epoch);
+  if (preflightLimit) return preflightLimit;
+
+  const validShape = !!username && username.length <= 254 && !!password && password.length <= 1024;
+  const row = validShape ? await d.prepare("SELECT username,password_hash FROM admin_users WHERE lower(username)=lower(?)").bind(username).first() : null;
+  const verification = row ? await verifyPassword(row.password_hash, password) : (await consumeDummyPasswordWork(password.slice(0, 1024)), { valid: false, legacy: false });
+  if (verification.legacy) await consumeDummyPasswordWork(password);
+  if (!row || !verification.valid) {
+    const state = await recordLoginFailure(d, keyHash, epoch, cutoff, LOGIN_FAILURE_LIMIT);
+    const ipState = await recordLoginFailure(d, ipKeyHash, epoch, cutoff, LOGIN_IP_FAILURE_LIMIT);
+    const failureLimit = loginRateLimitResponse([state, ipState], epoch);
+    if (failureLimit) return failureLimit;
+    return err("Invalid login", 401);
+  }
+  if (verification.legacy) {
+    await d.prepare("UPDATE admin_users SET password_hash=? WHERE username=? AND password_hash=?").bind(await hashPassword(password), row.username, row.password_hash).run();
+  }
+  await d.batch([
+    d.prepare("DELETE FROM login_attempts WHERE key_hash=?").bind(keyHash),
+    d.prepare("DELETE FROM login_attempts WHERE key_hash=?").bind(ipKeyHash)
+  ]);
   const bytes = new Uint8Array(32); crypto.getRandomValues(bytes);
   const tok = b64(bytes);
-  await db(env).prepare("INSERT INTO auth_sessions(token_hash,username,expires_at) VALUES(?,?,datetime('now','+12 hours'))").bind(await sha(tok), row.username).run();
+  await d.prepare("INSERT INTO auth_sessions(token_hash,username,expires_at) VALUES(?,?,datetime('now','+12 hours'))").bind(await sha(tok), row.username).run();
   return j({ ok: true, user: { username: row.username } }, 200, { "set-cookie": `${COOKIE}=${encodeURIComponent(tok)}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax` });
 }
 async function logout(req, env) {
   const tok = cookie(req, COOKIE);
-  if (tok) { await tables(env); await db(env).prepare("DELETE FROM auth_sessions WHERE token_hash=?").bind(await sha(tok)).run(); }
+  if (tok) { const d = await tables(env); await d.prepare("DELETE FROM auth_sessions WHERE token_hash=?").bind(await sha(tok)).run(); }
   return j({ ok: true }, 200, { "set-cookie": `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` });
 }
 async function admins(req, env) {
   const a = await auth(req, env); if (!a.ok) return a.response;
-  await tables(env);
-  if (req.method === "GET") return j({ ok: true, admins: (await db(env).prepare("SELECT id,username,role,created_at FROM admin_users ORDER BY id").all()).results });
+  const d = await tables(env);
+  if (req.method === "GET") return j({ ok: true, admins: (await d.prepare("SELECT id,username,role,created_at FROM admin_users ORDER BY id").all()).results });
   const b = await body(req), username = String(b.username || "").trim(), password = String(b.password || "");
-  if (!username.includes("@") || password.length < 10) return err("Use email and 10+ character password", 422);
+  if (!username.includes("@") || username.length > 254 || password.length < 14 || password.length > 1024) return err("Use email and a 14+ character password", 422);
   try {
-    await db(env).prepare("INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,'admin')").bind(username, await sha(`${SALT}:${password}`)).run();
+    await d.prepare("INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,'admin')").bind(username, await hashPassword(password)).run();
     return j({ ok: true, admin: { username, role: "admin" } }, 201);
   } catch { return err("Admin already exists", 409); }
 }
@@ -303,15 +466,166 @@ function aiAudit(r) {
     priorityActions: actions.length ? actions : ["Maintain current setup and monitor changes after the next crawl."]
   };
 }
-async function fetchPage(url) {
-  const c = new AbortController(), t = setTimeout(() => c.abort(), 9000);
+async function readTextBounded(response, limit) {
+  if (!response.body) return "";
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let output = "", size = 0;
   try {
-    const res = await fetch(url, { signal: c.signal, headers: { "user-agent": "Mozilla/5.0 SEO-AEO-GEO-Monitor/1.0", accept: "text/html,*/*" } });
-    return { status: res.status, finalUrl: res.url, html: (await res.text()).slice(0, 450000) };
-  } finally { clearTimeout(t); }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return output + decoder.decode();
+      const remaining = limit - size;
+      if (value.byteLength > remaining) {
+        if (remaining > 0) output += decoder.decode(value.subarray(0, remaining), { stream: true });
+        await reader.cancel().catch(() => {});
+        return output + decoder.decode();
+      }
+      size += value.byteLength;
+      output += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+function ipv4Number(value) {
+  const parts = String(value).split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return null;
+  return parts.reduce((result, part) => result * 256 + Number(part), 0);
+}
+function ipv4InRange(value, base, prefix) {
+  const address = ipv4Number(value), network = ipv4Number(base);
+  if (address === null || network === null) return false;
+  const block = 2 ** (32 - prefix);
+  return Math.floor(address / block) === Math.floor(network / block);
+}
+function isPublicIpv4(value) {
+  if (ipv4Number(value) === null) return false;
+  return ![
+    ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+    ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+    ["192.31.196.0", 24], ["192.52.193.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16],
+    ["192.175.48.0", 24], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
+    ["224.0.0.0", 4], ["240.0.0.0", 4]
+  ].some(([base, prefix]) => ipv4InRange(value, base, prefix));
+}
+function ipv6Number(value) {
+  let input = String(value).toLowerCase();
+  if (input.includes("%")) return null;
+  const ipv4Tail = input.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
+  if (ipv4Tail) {
+    const ipv4 = ipv4Number(ipv4Tail);
+    if (ipv4 === null) return null;
+    input = `${input.slice(0, -ipv4Tail.length)}${((ipv4 >>> 16) & 0xffff).toString(16)}:${(ipv4 & 0xffff).toString(16)}`;
+  }
+  const halves = input.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [], right = halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return null;
+  const parts = [...left, ...Array(Math.max(0, missing)).fill("0"), ...right];
+  if (parts.length !== 8 || parts.some((part) => !/^[a-f0-9]{1,4}$/.test(part))) return null;
+  return parts.reduce((result, part) => (result << 16n) + BigInt(parseInt(part, 16)), 0n);
+}
+function ipv6InRange(value, base, prefix) {
+  const address = ipv6Number(value), network = ipv6Number(base);
+  if (address === null || network === null) return false;
+  const shift = BigInt(128 - prefix);
+  return (address >> shift) === (network >> shift);
+}
+function isPublicIpv6(value) {
+  const address = ipv6Number(value);
+  if (address === null || !ipv6InRange(value, "2000::", 3)) return false;
+  return ![
+    ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3ffe::", 16],
+    ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8]
+  ].some(([base, prefix]) => ipv6InRange(value, base, prefix));
+}
+function publicLiteralAddress(hostname) {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (ipv4Number(host) !== null) return isPublicIpv4(host);
+  if (host.includes(":")) return isPublicIpv6(host);
+  return null;
+}
+async function dohAddresses(hostname, type) {
+  const endpoint = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`;
+  let response;
+  try {
+    response = await fetch(endpoint, { redirect: "manual", headers: { accept: "application/dns-json" }, signal: AbortSignal.timeout(4000) });
+    if (response.status >= 300 && response.status < 400) throw new Error("DNS redirect rejected");
+    if (!response.ok) throw new Error("DNS response failed");
+    const payload = JSON.parse(await readTextBounded(response, 32 * 1024));
+    return (payload.Answer || []).filter((answer) => answer.type === (type === "A" ? 1 : 28)).map((answer) => String(answer.data || ""));
+  } catch (error) {
+    if (response?.body) await response.body.cancel().catch(() => {});
+    console.warn("DNS validation failed", { hostname, type, error: error instanceof Error ? error.message : String(error) });
+    throw new HttpError("Unable to validate URL host", 502);
+  }
+}
+const dnsValidationCache = new Map();
+async function validateHostname(hostname) {
+  const host = hostname.replace(/\.$/, "").toLowerCase();
+  const literal = publicLiteralAddress(host);
+  if (literal !== null) {
+    if (!literal) throw new HttpError("URL is not allowed", 422);
+    return;
+  }
+  if (!host || host.length > 253 || host === "localhost" || !host.includes(".") || /(?:^|\.)(?:localhost|local|internal|home\.arpa|lan|onion|invalid|test|example)$/.test(host)) throw new HttpError("URL is not allowed", 422);
+  const cached = dnsValidationCache.get(host);
+  if (cached && cached.expires > Date.now()) return cached.promise;
+  const promise = (async () => {
+    const addresses = (await Promise.all([dohAddresses(host, "A"), dohAddresses(host, "AAAA")])).flat();
+    if (!addresses.length) throw new HttpError("URL host could not be resolved", 422);
+    if (addresses.some((address) => publicLiteralAddress(address) !== true)) throw new HttpError("URL is not allowed", 422);
+  })();
+  dnsValidationCache.set(host, { expires: Date.now() + 30000, promise });
+  if (dnsValidationCache.size > 256) dnsValidationCache.delete(dnsValidationCache.keys().next().value);
+  try { await promise; } catch (error) { dnsValidationCache.delete(host); throw error; }
+}
+async function validatePublicUrl(value) {
+  let url;
+  try { url = value instanceof URL ? new URL(value.toString()) : new URL(String(value)); }
+  catch { throw new HttpError("Invalid URL", 422); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new HttpError("URL is not allowed", 422);
+  await validateHostname(url.hostname);
+  return url;
+}
+async function safeFetch(value, init = {}, options = {}) {
+  let current = await validatePublicUrl(value), requestInit = { ...init, redirect: "manual" };
+  const maxRedirects = Math.min(3, Math.max(0, Number(options.maxRedirects ?? 3)));
+  for (let redirects = 0; ; redirects++) {
+    let response;
+    try { response = await fetch(current.toString(), requestInit); }
+    catch { throw new HttpError("Outbound request failed", 502); }
+    const location = response.headers.get("location");
+    if (![301, 302, 303, 307, 308].includes(response.status) || !location) return { response, finalUrl: current.toString() };
+    if (options.redirects === "error") {
+      await response.body?.cancel().catch(() => {});
+      throw new HttpError("Connector redirects are not allowed", 502);
+    }
+    if (redirects >= maxRedirects) {
+      await response.body?.cancel().catch(() => {});
+      throw new HttpError("Too many outbound redirects", 502);
+    }
+    const next = await validatePublicUrl(new URL(location, current));
+    await response.body?.cancel().catch(() => {});
+    if (response.status === 303 && requestInit.method && requestInit.method !== "GET" && requestInit.method !== "HEAD") {
+      const headers = new Headers(requestInit.headers || {}); headers.delete("content-type");
+      requestInit = { ...requestInit, method: "GET", body: undefined, headers };
+    }
+    current = next;
+  }
+}
+async function fetchPage(url) {
+  try {
+    const result = await safeFetch(url, { signal: AbortSignal.timeout(9000), headers: { "user-agent": "Mozilla/5.0 SEO-AEO-GEO-Monitor/1.0", accept: "text/html,*/*" } });
+    return { status: result.response.status, finalUrl: result.finalUrl, html: await readTextBounded(result.response, 450000) };
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError("Unable to fetch target", 502);
+  }
 }
 async function audit(url) {
-  const input = norm(url); if (!input) throw new Error("Invalid domain");
+  const input = norm(url); if (!input) throw new HttpError("Invalid domain", 422);
   const inputHost = hostOf(input);
   const start = Date.now(), p = await fetchPage(input), h = p.html, base = p.finalUrl || input, host = new URL(base).hostname.replace(/^www\./, "");
   const bodyHtml = first(h, /<body\b[^>]*>([\s\S]*?)<\/body>/i) || h;
@@ -342,29 +656,51 @@ async function audit(url) {
   r.score = sc.score; r.scoreBreakdown = sc.breakdown; r.issues = sc.issues; r.aiAudit = aiAudit(r); r.growthPlan = growthPlan(r); r.recommendations = { actionPlan: actions.concat(r.aiAudit.priorityActions).filter((x, i, arr) => arr.indexOf(x) === i), registrationPlan: r.growthPlan, summary: [`Detected focus keywords: ${r.content.topKeywords.slice(0, 8).map((x) => x.text).join(", ") || "not enough content"}.`, `Platforms detected: ${r.platforms.map((x) => x.platform).join(", ") || "none"}.`, `AEO/GEO readiness: ${r.schema.types.length ? "schema foundation exists" : "weak; schema missing"}.`] };
   return r;
 }
+async function acquireAuditLock(d, host) {
+  const tokenBytes = new Uint8Array(24); crypto.getRandomValues(tokenBytes);
+  const token = b64(tokenBytes), epoch = Math.floor(Date.now() / 1000);
+  await d.prepare("INSERT INTO audit_locks(host,lock_token,expires_at,created_at) VALUES(?,?,?,?) ON CONFLICT(host) DO UPDATE SET lock_token=excluded.lock_token,expires_at=excluded.expires_at,created_at=excluded.created_at WHERE audit_locks.expires_at<=?").bind(host, token, epoch + AUDIT_LOCK_SECONDS, epoch, epoch).run();
+  const lock = await d.prepare("SELECT lock_token,expires_at FROM audit_locks WHERE host=?").bind(host).first();
+  if (!lock || lock.lock_token !== token) throw new HttpError("An audit is already running for this host", 409, { "retry-after": String(Math.max(1, Number(lock?.expires_at || epoch + 1) - epoch)) });
+  return token;
+}
 async function saveAudit(env, url, keyword = "") {
-  await tables(env); const d = db(env), u = norm(url);
-  let target = await d.prepare("SELECT id FROM targets WHERE url=?").bind(u).first();
-  if (!target) { const x = await d.prepare("INSERT INTO targets(url,keyword,status) VALUES(?,?,'processing')").bind(u, keyword).run(); target = { id: x.meta.last_row_id }; }
-  else await d.prepare("UPDATE targets SET keyword=?,status='processing',updated_at=datetime('now') WHERE id=?").bind(keyword, target.id).run();
+  const d = await tables(env), u = norm(url);
+  if (!u) throw new HttpError("Invalid domain", 422);
+  const validatedTarget = await validatePublicUrl(u), lockHost = hostOf(validatedTarget.toString());
+  if (!lockHost) throw new HttpError("Invalid domain", 422);
+  const lockToken = await acquireAuditLock(d, lockHost);
+  let target;
   try {
+    target = await d.prepare("SELECT id FROM targets WHERE url=?").bind(u).first();
+    if (!target) { const x = await d.prepare("INSERT INTO targets(url,keyword,status) VALUES(?,?,'processing')").bind(u, keyword).run(); target = { id: x.meta.last_row_id }; }
+    else await d.prepare("UPDATE targets SET keyword=?,status='processing',updated_at=datetime('now') WHERE id=?").bind(keyword, target.id).run();
+
     const report = await audit(u);
     report.externalConnectors = await externalIntel(env, report);
+    const epoch = Math.floor(Date.now() / 1000);
+    const renewed = await d.prepare("UPDATE audit_locks SET expires_at=? WHERE host=? AND lock_token=? AND expires_at>?").bind(epoch + AUDIT_LOCK_SECONDS, lockHost, lockToken, epoch).run();
+    if (!renewed.meta?.changes) throw new HttpError("Audit lock expired; retry the audit", 409, { "retry-after": "1" });
     await d.batch([
-      d.prepare("INSERT INTO domain_audits(target_id,url,host,status,score,report_json) VALUES(?,?,?,'completed',?,?)").bind(target.id, report.inputUrl || u, report.inputHost || hostOf(u) || report.host, report.score, JSON.stringify(report)),
+      d.prepare("INSERT INTO domain_audits(target_id,url,host,normalized_host,status,score,report_json) VALUES(?,?,?,?,'completed',?,?)").bind(target.id, report.inputUrl || u, report.inputHost || lockHost || report.host, report.inputHost || lockHost || report.host, report.score, JSON.stringify(report)),
       d.prepare("UPDATE targets SET status='completed',updated_at=datetime('now') WHERE id=?").bind(target.id),
-      d.prepare("INSERT INTO monitor_logs(target_id,platform,rank_or_mention,response_snippet) VALUES(?,'site-audit',?,?)").bind(target.id, `score-${report.score}`, report.recommendations.summary.join(" "))
+      d.prepare("INSERT INTO monitor_logs(target_id,platform,rank_or_mention,response_snippet) VALUES(?,'site-audit',?,?)").bind(target.id, `score-${report.score}`, report.recommendations.summary.join(" ")),
+      d.prepare("DELETE FROM domain_audits WHERE target_id=? AND id NOT IN (SELECT id FROM domain_audits WHERE target_id=? ORDER BY id DESC LIMIT 50)").bind(target.id, target.id),
+      d.prepare("DELETE FROM monitor_logs WHERE target_id=? AND id NOT IN (SELECT id FROM monitor_logs WHERE target_id=? ORDER BY id DESC LIMIT 200)").bind(target.id, target.id),
+      d.prepare("DELETE FROM monitor_logs WHERE id NOT IN (SELECT id FROM monitor_logs ORDER BY id DESC LIMIT 5000)")
     ]);
     return report;
-  } catch (e) {
-    await d.prepare("UPDATE targets SET status='failed',updated_at=datetime('now') WHERE id=?").bind(target.id).run();
-    throw e;
+  } catch (error) {
+    if (target?.id) await d.prepare("UPDATE targets SET status='failed',updated_at=datetime('now') WHERE id=?").bind(target.id).run().catch(() => {});
+    throw error;
+  } finally {
+    await d.prepare("DELETE FROM audit_locks WHERE host=? AND lock_token=?").bind(lockHost, lockToken).run().catch(() => {});
   }
 }
 async function targets(req, env) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
   if (req.method === "POST") { const b = await body(req); return j({ ok: true, report: await saveAudit(env, b.url || b.domain, "") }, 201); }
-  return j({ ok: true, targets: (await db(env).prepare("SELECT t.*,(SELECT score FROM domain_audits a WHERE a.target_id=t.id ORDER BY id DESC LIMIT 1) latest_score,(SELECT id FROM domain_audits a WHERE a.target_id=t.id ORDER BY id DESC LIMIT 1) latest_report_id FROM targets t ORDER BY updated_at DESC").all()).results });
+  return j({ ok: true, targets: (await db(env).prepare("SELECT t.*,(SELECT score FROM domain_audits a WHERE a.target_id=t.id ORDER BY id DESC LIMIT 1) latest_score,(SELECT id FROM domain_audits a WHERE a.target_id=t.id ORDER BY id DESC LIMIT 1) latest_report_id FROM targets t ORDER BY updated_at DESC LIMIT 100").all()).results });
 }
 async function reports(req, env, id) {
   const a = await auth(req, env); if (!a.ok) return a.response; await tables(env);
@@ -400,9 +736,9 @@ async function connectorStatus(env) {
 }
 async function fetchTextFast(url, limit = 45000) {
   try {
-    const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 SEO-AEO-GEO-Monitor/1.0", accept: "text/html,text/plain,*/*" }, signal: AbortSignal.timeout(5500) });
-    return { ok: res.ok, status: res.status, url: res.url, text: (await res.text()).slice(0, limit) };
-  } catch (e) { return { ok: false, status: 0, url, text: String(e.message || e) }; }
+    const result = await safeFetch(url, { headers: { "user-agent": "Mozilla/5.0 SEO-AEO-GEO-Monitor/1.0", accept: "text/html,text/plain,*/*" }, signal: AbortSignal.timeout(5500) });
+    return { ok: result.response.ok, status: result.response.status, url: result.finalUrl, text: await readTextBounded(result.response, limit) };
+  } catch (error) { return { ok: false, status: 0, url, text: error instanceof HttpError ? error.message : "Outbound request failed" }; }
 }
 async function nativeConnector(c, r) {
   const base = new URL(r.finalUrl || r.url).origin;
@@ -449,11 +785,11 @@ async function callConnector(c, r) {
     try {
       const init = { method: req.method, headers: { accept: "application/json,text/plain,*/*" }, signal: AbortSignal.timeout(6500) };
       if (req.body) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(req.body); }
-      const res = await fetch(req.url, init);
-      const txt = (await res.text()).slice(0, 1800);
-      if (res.ok) return { id: c.id, name: c.name, repo: c.repo, category: c.category, status: "live", endpoint: req.url, evidence: [txt] };
-      last = `HTTP ${res.status} from ${req.url}: ${txt.slice(0, 240)}`;
-    } catch (e) { last = String(e.message || e); }
+      const result = await safeFetch(req.url, init, { maxRedirects: req.method === "POST" ? 0 : 3, redirects: req.method === "POST" ? "error" : "follow" });
+      const txt = await readTextBounded(result.response, 1800);
+      if (result.response.ok) return { id: c.id, name: c.name, repo: c.repo, category: c.category, status: "live", endpoint: result.finalUrl, evidence: [txt] };
+      last = `HTTP ${result.response.status} from connector: ${txt.slice(0, 240)}`;
+    } catch (error) { last = error instanceof HttpError ? error.message : "Connector request failed"; }
   }
   return { id: c.id, name: c.name, repo: c.repo, category: c.category, status: "configured_but_unreachable", evidence: [last] };
 }
@@ -466,9 +802,13 @@ async function integrations(req, env) {
   if (req.method === "POST") {
     const b = await body(req), id = String(b.id || ""), c = CONNECTORS.find((x) => x.id === id);
     if (!c) return err("Unknown connector", 404);
-    const base = String(b.baseUrl || "").trim().replace(/\/$/, "");
+    let base = String(b.baseUrl || "").trim().replace(/\/$/, "");
     const enabled = b.enabled === false ? 0 : base ? 1 : 0;
-    if (base && !/^https?:\/\/[^ ]+$/i.test(base)) return err("Connector endpoint must be a valid http(s) URL", 422);
+    if (base) {
+      const validated = await validatePublicUrl(base);
+      validated.hash = "";
+      base = validated.toString().replace(/\/$/, "");
+    }
     await db(env).prepare("INSERT INTO connector_settings(id,base_url,enabled,updated_at) VALUES(?,?,?,datetime('now')) ON CONFLICT(id) DO UPDATE SET base_url=excluded.base_url,enabled=excluded.enabled,updated_at=datetime('now')").bind(id, base, enabled).run();
     return j({ ok: true, connector: (await connectorStatus(env)).find((x) => x.id === id) });
   }
@@ -527,11 +867,14 @@ function page() {
 
 async function route(req, env) {
   const u = new URL(req.url), p = u.pathname;
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: H });
+  const origin = req.headers.get("origin"), fetchSite = req.headers.get("sec-fetch-site");
+  if (origin && origin !== u.origin) throw new HttpError("Cross-origin request denied", 403);
+  if (p.startsWith("/api/") && fetchSite === "cross-site") throw new HttpError("Cross-origin request denied", 403);
+  if (req.method === "OPTIONS") return new Response(null, { status: 204 });
   if (p === "/" && req.method === "GET") return html(page());
   if (p === "/api/login" && req.method === "POST") return login(req, env);
   if (p === "/api/logout" && req.method === "POST") return logout(req, env);
-  if (p === "/api/session") return j({ ok: true, authenticated: !!(await user(req, env)), user: await user(req, env) });
+  if (p === "/api/session") { const sessionUser = await user(req, env); return j({ ok: true, authenticated: !!sessionUser, user: sessionUser }); }
   if (p === "/api/admins") return admins(req, env);
   if (p === "/api/integrations") return integrations(req, env);
   if (p.startsWith("/api/targets/") && req.method === "DELETE") return deleteTarget(req, env, p.split("/").pop());
@@ -543,7 +886,29 @@ async function route(req, env) {
   return err("Not found", 404);
 }
 
+function secureResponse(req, response) {
+  const headers = new Headers(response.headers), requestUrl = new URL(req.url), origin = req.headers.get("origin");
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
+  if (requestUrl.pathname.startsWith("/api/") || requestUrl.pathname === "/health") headers.set("cache-control", "no-store");
+  if (origin === requestUrl.origin) {
+    headers.set("access-control-allow-origin", origin);
+    headers.set("access-control-allow-credentials", "true");
+    headers.set("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+    headers.set("access-control-allow-headers", "Content-Type, Authorization");
+    headers.append("vary", "Origin");
+  }
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 export default {
-  async fetch(req, env) { try { return await route(req, env); } catch (e) { return err(e.message || "Internal error", 500); } },
+  async fetch(req, env) {
+    let response;
+    try { response = await route(req, env); }
+    catch (error) {
+      if (!(error instanceof HttpError)) console.error("Unhandled Worker error", error);
+      response = error instanceof HttpError ? err(error.message, error.status, error.headers) : err("Internal server error", 500);
+    }
+    return secureResponse(req, response);
+  },
   async scheduled(event, env, ctx) { ctx.waitUntil((async () => { await tables(env); const t = await db(env).prepare("SELECT url,keyword FROM targets WHERE status='pending' ORDER BY updated_at LIMIT 1").first(); if (t) await saveAudit(env, t.url, t.keyword); })()); },
 };
