@@ -502,6 +502,8 @@ function aiEvidence(r) {
     h2: r.seo.h2.slice(0, 10),
     canonical: r.technical.canonical,
     canonicalHost: r.technical.canonicalHost,
+    canonicalMatchesHost: r.technical.canonicalMatchesHost,
+    h1Count: r.seo.h1.length,
     robots: r.technical.robots,
     images: r.technical.images,
     imagesMissingAlt: r.technical.imagesMissingAlt,
@@ -520,7 +522,7 @@ function validAiLanguage(value) {
 async function generateWorkersAiAudit(env, report) {
   const attemptedAt = now();
   if (!env.AI?.run) return { metadata: { status: "unavailable", model: AI_MODEL, attemptedAt, message: "Workers AI binding is unavailable." } };
-  const prompt = `You are a senior technical SEO, AEO and GEO auditor. Analyze only the supplied crawl evidence. Do not invent Google rankings, search volume, backlinks, platform registrations or traffic. Produce domain-specific, tactical recommendations. Explain canonical conflicts and missing entity signals precisely. Return both concise professional English and Simplified Chinese.\n\nCRAWL EVIDENCE:\n${JSON.stringify(aiEvidence(report))}`;
+  const prompt = `You are a senior technical SEO, AEO and GEO auditor. Analyze only the supplied crawl evidence. Do not invent Google rankings, search volume, backlinks, platform registrations, traffic, language, country, or regulatory facts. Produce domain-specific, tactical recommendations. If canonicalMatchesHost is true, explicitly say the canonical is aligned and never call it a conflict. If it is false, name both hosts. Never recommend removing a valid same-host canonical. Treat h1Count and detected platform arrays as authoritative. Return both concise professional English and Simplified Chinese.\n\nCRAWL EVIDENCE:\n${JSON.stringify(aiEvidence(report))}`;
   try {
     const result = await env.AI.run(AI_MODEL, {
       messages: [
@@ -801,10 +803,11 @@ async function generateSavedReportAi(req, env, id) {
   if (!Number.isInteger(reportId) || reportId < 1) return err("Invalid report id", 422);
   const d = db(env), row = await d.prepare("SELECT * FROM domain_audits WHERE id=?").bind(reportId).first();
   if (!row) return err("Report not found", 404);
+  const request = await body(req), force = request.force === true;
   const data = JSON.parse(row.report_json);
   if (data.aiGenerated && data.aiGeneration?.status === "generated") return j({ ok: true, cached: true, report: { ...row, data } });
   const previousAttempt = Date.parse(data.aiGeneration?.attemptedAt || "");
-  if (Number.isFinite(previousAttempt) && Date.now() - previousAttempt < 60 * 60 * 1000) {
+  if (!force && Number.isFinite(previousAttempt) && Date.now() - previousAttempt < 60 * 60 * 1000) {
     return j({ ok: true, cached: true, report: { ...row, data } });
   }
   const generated = await generateWorkersAiAudit(env, data);
@@ -953,7 +956,18 @@ function page() {
   function groupedReports(rows){let g={};rows.forEach(x=>{let h=x.display_host||x.host;(g[h]=g[h]||[]).push(x)});return Object.entries(g).map(([host,items])=>'<div class=report data-id='+items[0].id+'><b>'+eh(host)+'</b><p class=muted>'+items.length+' '+tr("reportCount")+' | '+tr("latest")+' '+eh(items[0].created_at)+' | '+tr("score")+' '+items[0].score+'</p><small class=muted>'+items.slice(0,4).map(x=>eh(x.created_at)+' '+tr("score")+' '+x.score).join('<br>')+'</small></div>').join("")}
   function connectorHtml(c){let live=c.status==="configured"?"Live endpoint":tr("autoRunning");return '<div class=connector><b>'+eh(c.name)+'</b> <span class=badge>'+eh(live)+'</span><p class=muted>'+eh(c.category)+'</p><p class=muted>'+tr("bundled")+' | '+eh(c.mode||"")+'</p><a style="color:#93c5fd;font-weight:800" href="'+eh(c.repo)+'" target=_blank rel=noopener>GitHub: '+eh(c.repo)+'</a></div>'}
   function bindConnectorControls(){}
-  async function openReport(id,destination){let box=destination==="reports"?E("rd"):E("latest");box.classList.remove("muted");box.innerHTML='<p class=muted>'+(lang==="zh"?"正在加载域名报告和 AI 分析...":"Loading domain report and AI analysis...")+'</p>';let d=await api("/api/reports/"+id),data=d.report.data,attempt=Date.parse(data.aiGeneration?.attemptedAt||"");if(!data.aiGenerated&&(!Number.isFinite(attempt)||Date.now()-attempt>3600000)){try{d=await api("/api/reports/"+id+"/ai",{method:"POST",body:"{}"});data=d.report.data}catch(e){console.warn("AI report generation failed",e)}}box.innerHTML=report(data);if(destination)nav(destination)}
+  async function openReport(id,destination,force=false){
+    let box=destination==="reports"?E("rd"):E("latest");
+    box.classList.remove("muted");
+    box.innerHTML='<p class=muted>'+(lang==="zh"?"正在加载域名报告和 AI 分析...":"Loading domain report and AI analysis...")+'</p>';
+    let d=await api("/api/reports/"+id),data=d.report.data,attempt=Date.parse(data.aiGeneration?.attemptedAt||"");
+    if(!data.aiGenerated&&(force||!Number.isFinite(attempt)||Date.now()-attempt>3600000)){
+      try{d=await api("/api/reports/"+id+"/ai",{method:"POST",body:JSON.stringify({force})});data=d.report.data}catch(e){console.warn("AI report generation failed",e)}
+    }
+    box.innerHTML=report(data);
+    if(!data.aiGenerated){let state=box.querySelector(".ai-state");if(state){state.insertAdjacentHTML("beforeend",'<button class="btn btn2 mini" data-ai-retry>'+ (lang==="zh"?"重试 AI":"Retry AI") +'</button>');let retry=state.querySelector("[data-ai-retry]");retry.onclick=()=>openReport(id,destination||"audit",true)}}
+    if(destination)nav(destination)
+  }
   async function load(){applyLang();let [targetsResp,l,r,a,i]=await Promise.all([api("/api/targets"),api("/api/logs"),api("/api/reports"),api("/api/admins"),api("/api/integrations")]);E("mt").textContent=targetsResp.targets.length;E("mr").textContent=r.reports.length;E("ms").textContent=r.reports[0]?.score??"-";E("mst").textContent=r.reports[0]?.status??"-";E("targetCards").innerHTML=targetsResp.targets.length?targetsResp.targets.map(x=>'<div class="connector domain-card" data-open="'+eh(x.latest_report_id||"")+'"><b>'+eh(x.url)+'</b> <span class=badge>'+eh(x.status)+'</span><p class=muted>'+tr("score")+': '+eh(x.latest_score??"-")+' | '+(lang==="zh"?"打开最新报告":"Open latest report")+'</p></div>').join(""):'<p class=muted>'+tr("noDomains")+'</p>';q("[data-open]").forEach(x=>x.onclick=()=>x.dataset.open&&openReport(x.dataset.open,"audit"));E("targets").innerHTML=targetsResp.targets.length?targetsResp.targets.map(x=>'<tr><td>'+eh(x.url)+'</td><td><span class=badge>'+eh(x.status)+'</span></td><td>'+eh(x.latest_score??"-")+'</td><td>'+(x.latest_report_id?'<button class="btn btn2 mini" data-view-report="'+x.latest_report_id+'">'+(lang==="zh"?"查看":"View")+'</button> ':'')+'<button class="btn btn2 danger mini" data-del="'+x.id+'">'+tr("delete")+'</button></td></tr>').join(""):'<tr><td colspan=4 class=muted>'+tr("noDomains")+'</td></tr>';q("[data-view-report]").forEach(b=>b.onclick=()=>openReport(b.dataset.viewReport,"audit"));q("[data-del]").forEach(b=>b.onclick=async()=>{if(!confirm(tr("deleteConfirm")))return;b.disabled=1;try{await api("/api/targets/"+b.dataset.del,{method:"DELETE"});await load()}catch(e){alert(e.message||tr("deleteFailed"))}finally{b.disabled=0}});E("logs").innerHTML=l.logs.length?l.logs.map(x=>'<tr><td>'+eh(x.checked_at)+'</td><td>'+eh(x.url||"-")+'</td><td>'+eh(x.platform)+'</td><td>'+eh(x.rank_or_mention)+'<br><span class=muted>'+eh(x.response_snippet)+'</span></td></tr>').join(""):'<tr><td colspan=4 class=muted>'+tr("noLogs")+'</td></tr>';E("rl").innerHTML=r.reports.length?groupedReports(r.reports):'<p class=muted>'+tr("noReports")+'</p>';q(".report").forEach(x=>x.onclick=()=>openReport(x.dataset.id,"reports"));E("connectorRows").innerHTML=i.connectors.map(connectorHtml).join("");bindConnectorControls();E("adminRows").innerHTML=a.admins.map(x=>'<tr><td>'+eh(x.username)+'</td><td>'+eh(x.role)+'</td><td>'+eh(x.created_at)+'</td></tr>').join("");if(r.reports[0])await openReport(r.reports[0].id,null);else E("latest").textContent=tr("runFirst");if(!r.reports.length)E("rd").textContent=tr("selectReport")}
   q("[data-lang]").forEach(b=>b.onclick=async()=>{lang=b.dataset.lang;localStorage.setItem("seoLang",lang);applyLang();if(!E("app").classList.contains("hide"))await load()});
   E("lf").onsubmit=async e=>{e.preventDefault();E("le").textContent="";E("lb").disabled=1;try{await api("/api/login",{method:"POST",body:JSON.stringify({username:E("u").value.trim(),password:E("p").value})});show(1);await load()}catch(x){E("le").textContent=x.message||tr("loginFailed")}finally{E("lb").disabled=0}}
