@@ -1,6 +1,6 @@
 # SEO / AEO / GEO Monitor
 
-Cloudflare Workers + D1 application for authenticated SEO target auditing, reports, connector status, and scheduled monitoring. Cloudflare Workers and D1 are the production runtime.
+Cloudflare Workers + D1 application for authenticated SEO target auditing, bilingual Workers AI reports, connector status, and scheduled monitoring. Cloudflare Workers, Workers AI, and D1 are the production runtime.
 
 ## Requirements
 
@@ -98,6 +98,7 @@ The deployed Worker serves the web UI at `/`. Unless noted otherwise, API routes
 | `GET` | `/api/logs` | Required | List monitor logs |
 | `GET` | `/api/reports` | Required | List audit reports |
 | `GET` | `/api/reports/:id` | Required | Read one audit report |
+| `POST` | `/api/reports/:id/ai` | Required | Generate and cache a bilingual Workers AI analysis for an existing report |
 | `GET` | `/api/admins` | Required | List administrators without password hashes |
 | `POST` | `/api/admins` | Required | Create an administrator |
 | `GET` | `/api/integrations` | Required | List connector configuration and status |
@@ -110,6 +111,8 @@ Example target request body:
   "url": "https://example.com"
 }
 ```
+
+Every new audit stores the raw crawl evidence, deterministic score, connector evidence, and a bilingual Cloudflare Workers AI analysis in D1. Existing reports are upgraded on first view. AI output is grounded only in collected evidence and does not invent search volume, traffic, backlinks, or Google positions.
 
 ## Live Worker
 

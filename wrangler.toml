@@ -3,6 +3,10 @@ main = "src/index.js"
 compatibility_date = "2026-07-13"
 compatibility_flags = ["global_fetch_strictly_public"]
 
+[ai]
+binding = "AI"
+remote = true
+
 [triggers]
 crons = ["*/10 * * * *"]
 
