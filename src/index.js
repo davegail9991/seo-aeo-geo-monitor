@@ -807,7 +807,8 @@ async function generateSavedReportAi(req, env, id) {
   const data = JSON.parse(row.report_json);
   if (data.aiGenerated && data.aiGeneration?.status === "generated") return j({ ok: true, cached: true, report: { ...row, data } });
   const previousAttempt = Date.parse(data.aiGeneration?.attemptedAt || "");
-  if (!force && Number.isFinite(previousAttempt) && Date.now() - previousAttempt < 60 * 60 * 1000) {
+  const retryDelay = force ? 60 * 1000 : 60 * 60 * 1000;
+  if (Number.isFinite(previousAttempt) && Date.now() - previousAttempt < retryDelay) {
     return j({ ok: true, cached: true, report: { ...row, data } });
   }
   const generated = await generateWorkersAiAudit(env, data);
